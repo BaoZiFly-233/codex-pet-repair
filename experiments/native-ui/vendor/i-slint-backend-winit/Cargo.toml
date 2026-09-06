@@ -7,7 +7,7 @@
 #
 # If you are reading this file be aware that the original Cargo.toml
 # will likely look very different (and much more reasonable).
-# See Cargo.toml.orig for the original contents.
+# Local build subset: upstream standalone integration tests are omitted.
 
 [package]
 edition = "2024"
@@ -103,11 +103,7 @@ x11 = [
 [lib]
 name = "i_slint_backend_winit"
 path = "lib.rs"
-
-[[test]]
-name = "menubar_borrow"
-path = "tests/menubar_borrow.rs"
-harness = false
+test = false
 
 [dependencies.bytemuck]
 version = "1.13.1"
