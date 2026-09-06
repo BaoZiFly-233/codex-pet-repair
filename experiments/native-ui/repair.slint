@@ -1,0 +1,161 @@
+import { Button, Switch, ScrollView, ProgressIndicator, Palette, AboutSlint } from "std-widgets.slint";
+import { FluentPalette, Icons } from "builtin:/fluent/styling.slint";
+import { MenuFrame } from "builtin:/fluent/menu.slint";
+
+component ToggleCard inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> value;
+    in property <bool> enabled: true;
+    callback changed(bool);
+    Button {
+        width: parent.width; height: parent.height;
+        enabled: root.enabled;
+        accessible-label: root.label;
+        clicked => { root.value = !root.value; root.changed(root.value); }
+    }
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 8px;
+        Text { text: root.label; color: root.enabled ? FluentPalette.control-foreground : FluentPalette.text-disabled; vertical-alignment: center; }
+        Switch { checked <=> root.value; enabled: root.enabled; accessible-label: root.label; toggled => { root.changed(self.checked); } }
+    }
+}
+
+export component RepairWindow inherits Window {
+    title: "Codex 宠物修复";
+    icon: @image-url("../../assets/pet-repair-pixel.svg");
+    preferred-width: 432px;
+    preferred-height: 420px;
+    min-width: 320px;
+    min-height: 260px;
+    default-font-size: 14px;
+    background: Palette.background;
+    in-out property <string> status: "正在连接…";
+    in-out property <string> hint;
+    in-out property <string> notice;
+    in-out property <bool> automatic;
+    in-out property <bool> autostart;
+    in-out property <bool> tray-only;
+    in-out property <bool> busy;
+    in-out property <bool> can-repair;
+    in-out property <bool> confirming;
+    in-out property <bool> connected;
+    in-out property <bool> sending;
+    property <bool> narrow: root.width < 400px;
+    callback command(string, bool);
+    callback tray;
+    in-out property <int> theme: 1;
+    init => { Palette.color-scheme = root.theme == 2 ? ColorScheme.dark : ColorScheme.light; }
+    changed theme => { Palette.color-scheme = root.theme == 1 ? ColorScheme.light : root.theme == 2 ? ColorScheme.dark : ColorScheme.unknown; }
+    callback theme-changed(int);
+    function choose-theme(value: int) { root.theme = value; root.theme-changed(value); }
+    public function toggle-theme() { root.choose-theme(root.theme == 2 ? 1 : 2); }
+    public function preview-menu() { log-menu.show({ x: 0px, y: log-menu.height }); }
+    public function preview-license() { attribution.show(); }
+    public function preview-dark() { root.theme = 2; }
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 14px;
+        Rectangle {
+            height: root.narrow ? 72px : 32px;
+            Text { x: 0px; y: 0px; height: 32px; text: "Codex 宠物修复"; font-size: 20px; font-weight: 600; color: Palette.foreground; vertical-alignment: center; }
+            HorizontalLayout {
+                x: parent.width - self.width;
+                y: root.narrow ? 40px : 0px;
+                width: 152px; height: 32px; spacing: 8px;
+                Switch { text: "深色"; checked: root.theme == 2; accessible-label: "深色模式"; toggled => { root.choose-theme(self.checked ? 2 : 1); } }
+                Button { text: "托盘"; accessible-label: "切换到托盘模式"; clicked => { root.tray(); } }
+            }
+        }
+        viewport := ScrollView {
+            horizontal-scrollbar-policy: always-off;
+            viewport-width: self.visible-width;
+            viewport-height: max(self.visible-height, body.min-height);
+            body := VerticalLayout {
+                padding: 0px;
+                spacing: 12px;
+                Rectangle {
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: FluentPalette.control-border;
+                    background: FluentPalette.control-background;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+                        Text { text: root.status; font-size: 16px; font-weight: 600; color: Palette.foreground; wrap: word-wrap; }
+                        if root.hint != "": Text { text: root.hint; color: Palette.foreground; wrap: word-wrap; }
+                        if root.busy: ProgressIndicator { indeterminate: true; }
+                        if !root.confirming: Button {
+                            text: root.busy ? "取消" : "立即修复";
+                            primary: !root.busy;
+                            enabled: root.connected && !root.sending && (root.can-repair || root.busy);
+                            clicked => { root.command(root.busy ? "cancel" : "repair", false); }
+                        }
+                        if root.confirming: HorizontalLayout {
+                            spacing: 8px;
+                            Button { text: "可以拖动"; primary: true; enabled: !root.sending; clicked => { root.command("confirm", true); } }
+                            Button { text: "仍然不行"; enabled: !root.sending; clicked => { root.command("confirm", false); } }
+                        }
+                    }
+                }
+                tiles := Rectangle {
+                    min-height: root.narrow ? 286px : 138px;
+                    vertical-stretch: 1;
+                    property <length> card-width: root.narrow ? self.width : (self.width - 10px) / 2;
+                    property <length> card-height: root.narrow ? (self.height - 30px) / 4 : (self.height - 10px) / 2;
+                    ToggleCard {
+                        x: 0px; y: 0px;
+                        width: tiles.card-width; height: tiles.card-height;
+                        label: "自动修复"; value <=> root.automatic;
+                        enabled: root.connected && !root.sending && !root.busy;
+                        changed(value) => { root.command("automatic", value); }
+                    }
+                    ToggleCard {
+                        x: root.narrow ? 0px : tiles.card-width + 10px;
+                        y: root.narrow ? tiles.card-height + 10px : 0px;
+                        width: tiles.card-width; height: tiles.card-height;
+                        label: "仅托盘启动"; value <=> root.tray-only;
+                        enabled: root.connected && !root.sending;
+                        changed(value) => { root.command("tray_only", value); }
+                    }
+                    ToggleCard {
+                        x: 0px; y: (tiles.card-height + 10px) * (root.narrow ? 2 : 1);
+                        width: tiles.card-width; height: tiles.card-height;
+                        label: "开机启动"; value <=> root.autostart;
+                        enabled: root.connected && !root.sending;
+                        changed(value) => { root.command("autostart", value); }
+                    }
+                    Rectangle {
+                        x: root.narrow ? 0px : tiles.card-width + 10px;
+                        y: (tiles.card-height + 10px) * (root.narrow ? 3 : 1);
+                        width: tiles.card-width; height: tiles.card-height;
+                            log-menu := ContextMenuArea {
+                                width: parent.width; height: parent.height;
+                                HorizontalLayout {
+                                    spacing: 0px;
+                                    Button { text: "打开日志"; vertical-stretch: 1; horizontal-stretch: 1; enabled: root.connected && !root.sending; clicked => { root.command("open_log", false); } }
+                                    Button { icon: Icons.chevron-down; icon-size: 12px; colorize-icon: true; width: 40px; vertical-stretch: 1; accessible-label: "日志菜单"; clicked => { root.preview-menu(); } }
+                                }
+                                Menu {
+                                    MenuItem { title: "复制诊断摘要"; enabled: root.connected && !root.sending; activated => { root.command("copy_diagnostics", false); } }
+                                    MenuItem { title: "打开日志文件夹"; enabled: root.connected && !root.sending; activated => { root.command("open_log_folder", false); } }
+                                    MenuSeparator {}
+                                    MenuItem { title: "组件许可"; activated => { attribution.show(); } }
+                                }
+                        }
+                        attribution := PopupWindow {
+                            width: 280px;
+                            x: parent.width - self.width; y: -self.height - 6px;
+                            MenuFrame {
+                                VerticalLayout { padding: 12px; spacing: 8px; AboutSlint {} Button { text: "关闭"; clicked => { attribution.close(); } } }
+                            }
+                        }
+                    }
+                }
+                if root.notice != "": Text { text: root.notice; color: Palette.foreground; wrap: word-wrap; }
+            }
+        }
+        Button { text: "退出程序"; height: 34px; enabled: !root.sending; clicked => { root.command("exit", false); } }
+    }
+}

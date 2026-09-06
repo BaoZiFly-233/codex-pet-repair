@@ -1,0 +1,29 @@
+[package]
+name = "pet-repair-native-ui"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "accessibility"] }
+# Select the same backend without muda so context menus use Slint's Fluent widgets.
+i-slint-backend-winit = { version = "=1.17.1", default-features = false, features = ["renderer-software", "accessibility"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.18"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_IO", "Win32_Storage_FileSystem"] }
+
+[build-dependencies]
+slint-build = "=1.17.1"
+
+[patch.crates-io]
+i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
+i-slint-compiler = { path = "vendor/i-slint-compiler" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

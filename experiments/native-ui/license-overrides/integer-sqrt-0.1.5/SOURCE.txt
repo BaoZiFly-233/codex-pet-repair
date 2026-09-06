@@ -1,0 +1,1 @@
+https://raw.githubusercontent.com/derekdreery/integer-sqrt-rs/282d0d4e26fd41d888894f5578b9d7553f7be0c8/LICENSE-MIT
