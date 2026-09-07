@@ -1,6 +1,6 @@
 [package]
 name = "pet-repair"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 description = "A small native Windows utility to restore Codex overlay interaction"
@@ -14,9 +14,9 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader",
   "Win32_Storage_Packaging_Appx", "Win32_System_StationsAndDesktops",
   "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility",
-  "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_HiDpi",
+  "Win32_UI_Shell",
   "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi",
-  "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_Graphics_Dwm",
+  "Win32_System_Registry", "Win32_System_RemoteDesktop",
   "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_IO",
   "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Time"
 ] }

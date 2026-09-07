@@ -28,6 +28,9 @@ pub struct Delivery {
     pub reply: mpsc::Sender<Value>,
 }
 pub fn name() -> String {
+    format!("CodexPetRepair-v2-{}", session())
+}
+pub fn session() -> u32 {
     let mut session = 0;
     unsafe {
         windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId(
@@ -35,7 +38,7 @@ pub fn name() -> String {
             &mut session,
         );
     }
-    format!("CodexPetRepair-v2-{session}")
+    session
 }
 pub fn ui_path() -> std::path::PathBuf {
     std::env::current_exe()

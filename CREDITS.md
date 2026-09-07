@@ -22,9 +22,11 @@
 | [softbuffer](https://github.com/rust-windowing/softbuffer) | 窗口绘制 |
 | [Serde / serde_json](https://serde.rs/) | 设置与状态读写 |
 | [windows-rs / windows-sys](https://github.com/microsoft/windows-rs) | Windows 功能调用 |
-| [png](https://github.com/image-rs/image-png) | 界面截图导出 |
+| [png](https://github.com/image-rs/image-png) | 开发 feature 的截图导出；图像依赖链也使用 PNG 解码 |
 
 Slint 使用 Royalty-free Desktop, Mobile, and Web Applications License 2.0，窗口呈现、主题与菜单包含本项目的适配修改。
+
+界面采用 Slint 提供的 Fluent 风格标准 Switch、Button、布局与菜单组件，不是微软官方 WinUI。正式构建默认关闭开发预览和截图入口；实际分发依赖的许可由打包脚本按默认 feature 重新生成。
 
 依赖版本见 [核心](Cargo.lock)与[界面](experiments/native-ui/Cargo.lock)的锁定文件。许可原文见 [licenses](licenses) 和下载包中的 `THIRD-PARTY-NOTICES.txt`。
 

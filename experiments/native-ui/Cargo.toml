@@ -1,9 +1,13 @@
 [package]
 name = "pet-repair-native-ui"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
+
+[features]
+default = []
+dev-tools = ["dep:png"]
 
 [dependencies]
 slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "accessibility"] }
@@ -11,7 +15,7 @@ slint = { version = "=1.17.1", default-features = false, features = ["std", "com
 i-slint-backend-winit = { version = "=1.17.1", default-features = false, features = ["renderer-software", "accessibility"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-png = "0.18"
+png = { version = "0.18", optional = true }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_IO", "Win32_Storage_FileSystem"] }
 
 [build-dependencies]

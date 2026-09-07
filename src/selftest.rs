@@ -115,6 +115,86 @@ pub fn run(path: &Path) {
 }
 fn run_inner() -> Result<Vec<serde_json::Value>, String> {
     let mut rows = Vec::new();
+    let window = create()?;
+    let classification = (|| -> Result<(), String> {
+        let guard = native::TargetGuard::new(&window)?;
+        let marker = "PetRepair-classifier-self-test";
+        native::marker_set(window.hwnd, marker)?;
+        for _ in 0..1000 {
+            if !guard.matches(marker) {
+                return Err("cached target guard failed".into());
+            }
+        }
+        if guard.matches("wrong-marker") {
+            return Err("wrong marker accepted".into());
+        }
+        let mut owner = window.owner.clone();
+        owner.pid = 0;
+        if native::inspect_window(&owner, window.hwnd).is_some() {
+            return Err("wrong owner accepted".into());
+        }
+        owner = window.owner.clone();
+        owner.test = false;
+        if native::inspect_window(&owner, window.hwnd).is_some() {
+            return Err("wrong class accepted".into());
+        }
+        for flag in [WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW] {
+            native::set_style(window.hwnd, window.style & !flag)?;
+            if flag == WS_EX_TOPMOST {
+                unsafe {
+                    SetWindowPos(
+                        window.hwnd as HWND,
+                        HWND_NOTOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
+            }
+            if native::inspect_window(&window.owner, window.hwnd).is_some() {
+                return Err("wrong style accepted".into());
+            }
+            native::set_style(window.hwnd, window.style)?;
+            unsafe {
+                SetWindowPos(
+                    window.hwnd as HWND,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+        native::set_style(window.hwnd, window.style)?;
+        unsafe {
+            ShowWindow(window.hwnd as HWND, SW_HIDE);
+        }
+        if native::inspect_window(&window.owner, window.hwnd).is_some() {
+            return Err("hidden window accepted".into());
+        }
+        unsafe {
+            ShowWindow(window.hwnd as HWND, SW_SHOWNOACTIVATE);
+        }
+        if native::inspect_window(&window.owner, window.hwnd).is_none() {
+            return Err("reopened window missing".into());
+        }
+        native::marker_remove(window.hwnd, marker);
+        if guard.matches(marker) {
+            return Err("expired transaction accepted".into());
+        }
+        Ok(())
+    })();
+    unsafe {
+        DestroyWindow(window.hwnd as HWND);
+    }
+    classification?;
+    rows.push(
+        serde_json::json!({"scenario":"strict classifier and cached identity", "passed":true}),
+    );
     // These are our own off-screen windows; no Codex window is altered.
     for mode in ["normal", "cancel", "conflict", "crash", "destroy"] {
         let w = create()?;

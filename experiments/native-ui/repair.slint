@@ -1,38 +1,49 @@
-import { Button, Switch, ScrollView, ProgressIndicator, Palette, AboutSlint } from "std-widgets.slint";
+import { Button, Switch, ScrollView, ProgressIndicator, Palette, AboutSlint, GridBox, HorizontalBox, VerticalBox } from "std-widgets.slint";
 import { FluentPalette, Icons } from "builtin:/fluent/styling.slint";
 import { MenuFrame } from "builtin:/fluent/menu.slint";
 
-component ToggleCard inherits Rectangle {
+// A passive surface. All input, accessibility and animation belong to the widgets.
+component Surface inherits Rectangle {
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: FluentPalette.control-border;
+    background: FluentPalette.control-background;
+    @children
+}
+component Setting inherits Surface {
     in property <string> label;
     in-out property <bool> value;
     in property <bool> enabled: true;
     callback changed(bool);
-    Button {
-        width: parent.width; height: parent.height;
-        enabled: root.enabled;
-        accessible-label: root.label;
-        clicked => { root.value = !root.value; root.changed(root.value); }
-    }
-    HorizontalLayout {
+    height: 64px;
+    min-width: 0px;
+    preferred-width: 0px;
+    horizontal-stretch: 1;
+    VerticalBox {
         padding: 12px;
-        spacing: 8px;
-        Text { text: root.label; color: root.enabled ? FluentPalette.control-foreground : FluentPalette.text-disabled; vertical-alignment: center; }
-        Switch { checked <=> root.value; enabled: root.enabled; accessible-label: root.label; toggled => { root.changed(self.checked); } }
+        Switch {
+            text: root.label;
+            checked <=> root.value;
+            enabled: root.enabled;
+            horizontal-stretch: 1;
+            toggled => { root.changed(self.checked); }
+        }
     }
 }
-
 export component RepairWindow inherits Window {
     title: "Codex 宠物修复";
     icon: @image-url("../../assets/pet-repair-pixel.svg");
     preferred-width: 432px;
-    preferred-height: 420px;
+    preferred-height: min(680px, body.min-height + header.min-height + 114px);
     min-width: 320px;
     min-height: 260px;
     default-font-size: 14px;
     background: Palette.background;
     in-out property <string> status: "正在连接…";
     in-out property <string> hint;
+    in-out property <string> automatic-status;
     in-out property <string> notice;
+    in-out property <int> wait-seconds;
     in-out property <bool> automatic;
     in-out property <bool> autostart;
     in-out property <bool> tray-only;
@@ -41,121 +52,133 @@ export component RepairWindow inherits Window {
     in-out property <bool> confirming;
     in-out property <bool> connected;
     in-out property <bool> sending;
-    property <bool> narrow: root.width < 400px;
-    callback command(string, bool);
-    callback tray;
     in-out property <int> theme: 1;
-    init => { Palette.color-scheme = root.theme == 2 ? ColorScheme.dark : ColorScheme.light; }
-    changed theme => { Palette.color-scheme = root.theme == 1 ? ColorScheme.light : root.theme == 2 ? ColorScheme.dark : ColorScheme.unknown; }
+    property <bool> narrow: false;
+    // Before a native window has a size, width is zero; keep the default two-column estimate.
+    changed width => { root.narrow = root.width >= 320px && root.width < 400px; }
+    callback command(string, bool);
+    callback receive;
+    callback content-resized;
+    callback tray;
     callback theme-changed(int);
+    init => { Palette.color-scheme = root.theme == 2 ? ColorScheme.dark : ColorScheme.light; }
+    changed theme => { Palette.color-scheme = root.theme == 2 ? ColorScheme.dark : ColorScheme.light; }
     function choose-theme(value: int) { root.theme = value; root.theme-changed(value); }
     public function toggle-theme() { root.choose-theme(root.theme == 2 ? 1 : 2); }
     public function preview-menu() { log-menu.show({ x: 0px, y: log-menu.height }); }
     public function preview-license() { attribution.show(); }
-    public function preview-dark() { root.theme = 2; }
+    // Wrapped text can only report its real height once the native width is known.
+    out property <length> content-height: min(680px, body.min-height + header.min-height + 102px);
+    changed content-height => { root.content-resized(); }
+    out property <length> scroll-overflow: max(0px, body.min-height - content-scroll.visible-height);
 
-    VerticalLayout {
+    VerticalBox {
         padding: 20px;
         spacing: 14px;
-        Rectangle {
-            height: root.narrow ? 72px : 32px;
-            Text { x: 0px; y: 0px; height: 32px; text: "Codex 宠物修复"; font-size: 20px; font-weight: 600; color: Palette.foreground; vertical-alignment: center; }
-            HorizontalLayout {
-                x: parent.width - self.width;
-                y: root.narrow ? 40px : 0px;
-                width: 152px; height: 32px; spacing: 8px;
+        header := GridBox {
+            padding: 0px;
+            spacing: 8px;
+            vertical-stretch: 0;
+            Text {
+                row: 0; col: 0;
+                text: "Codex 宠物修复"; font-size: 20px; font-weight: 600;
+                color: Palette.foreground; vertical-alignment: center;
+            }
+            HorizontalBox {
+                row: root.narrow ? 1 : 0; col: root.narrow ? 0 : 1;
+                padding: 0px; spacing: 8px; alignment: end;
                 Switch { text: "深色"; checked: root.theme == 2; accessible-label: "深色模式"; toggled => { root.choose-theme(self.checked ? 2 : 1); } }
                 Button { text: "托盘"; accessible-label: "切换到托盘模式"; clicked => { root.tray(); } }
             }
         }
-        viewport := ScrollView {
+        content-scroll := ScrollView {
             horizontal-scrollbar-policy: always-off;
             viewport-width: self.visible-width;
             viewport-height: max(self.visible-height, body.min-height);
-            body := VerticalLayout {
-                padding: 0px;
-                spacing: 12px;
-                Rectangle {
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: FluentPalette.control-border;
-                    background: FluentPalette.control-background;
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 8px;
-                        Text { text: root.status; font-size: 16px; font-weight: 600; color: Palette.foreground; wrap: word-wrap; }
-                        if root.hint != "": Text { text: root.hint; color: Palette.foreground; wrap: word-wrap; }
-                        if root.busy: ProgressIndicator { indeterminate: true; }
+            body := VerticalBox {
+                padding: 0px; spacing: 12px;
+                Surface {
+                    vertical-stretch: 0;
+                    VerticalBox {
+                        padding: 16px; spacing: 8px;
+                        Text { text: root.status; font-size: 16px; font-weight: 600; color: Palette.foreground; wrap: word-wrap; vertical-stretch: 0; }
+                        if root.hint != "": Text { text: root.hint; color: Palette.foreground; wrap: word-wrap; vertical-stretch: 0; }
+                        if root.wait-seconds > 0: Text { text: "还需 " + root.wait-seconds + " 秒"; color: Palette.foreground; vertical-stretch: 0; }
+                        if root.automatic-status != "" && root.automatic-status != root.status: Text { text: root.automatic-status; color: FluentPalette.text-secondary; wrap: word-wrap; vertical-stretch: 0; }
+                        if root.busy: ProgressIndicator { height: 3px; indeterminate: true; }
                         if !root.confirming: Button {
-                            text: root.busy ? "取消" : "立即修复";
-                            primary: !root.busy;
+                            height: 32px;
+                            text: root.busy ? "取消" : "立即修复"; primary: !root.busy;
                             enabled: root.connected && !root.sending && (root.can-repair || root.busy);
                             clicked => { root.command(root.busy ? "cancel" : "repair", false); }
                         }
-                        if root.confirming: HorizontalLayout {
-                            spacing: 8px;
-                            Button { text: "可以拖动"; primary: true; enabled: !root.sending; clicked => { root.command("confirm", true); } }
-                            Button { text: "仍然不行"; enabled: !root.sending; clicked => { root.command("confirm", false); } }
+                        if root.confirming: HorizontalBox {
+                            height: 32px;
+                            padding: 0px; spacing: 8px;
+                            Button { text: "可以拖动"; primary: true; enabled: root.connected && !root.sending; clicked => { root.command("confirm", true); } }
+                            Button { text: "仍然不行"; enabled: root.connected && !root.sending; clicked => { root.command("confirm", false); } }
                         }
                     }
                 }
-                tiles := Rectangle {
-                    min-height: root.narrow ? 286px : 138px;
-                    vertical-stretch: 1;
-                    property <length> card-width: root.narrow ? self.width : (self.width - 10px) / 2;
-                    property <length> card-height: root.narrow ? (self.height - 30px) / 4 : (self.height - 10px) / 2;
-                    ToggleCard {
-                        x: 0px; y: 0px;
-                        width: tiles.card-width; height: tiles.card-height;
-                        label: "自动修复"; value <=> root.automatic;
+                GridBox {
+                    padding: 0px; spacing: 10px; vertical-stretch: 0;
+                    Setting {
+                        row: 0; col: 0; label: "自动修复"; value <=> root.automatic;
                         enabled: root.connected && !root.sending && !root.busy;
                         changed(value) => { root.command("automatic", value); }
                     }
-                    ToggleCard {
-                        x: root.narrow ? 0px : tiles.card-width + 10px;
-                        y: root.narrow ? tiles.card-height + 10px : 0px;
-                        width: tiles.card-width; height: tiles.card-height;
-                        label: "仅托盘启动"; value <=> root.tray-only;
-                        enabled: root.connected && !root.sending;
+                    Setting {
+                        row: root.narrow ? 1 : 0; col: root.narrow ? 0 : 1;
+                        label: "仅托盘启动"; value <=> root.tray-only; enabled: root.connected && !root.sending;
                         changed(value) => { root.command("tray_only", value); }
                     }
-                    ToggleCard {
-                        x: 0px; y: (tiles.card-height + 10px) * (root.narrow ? 2 : 1);
-                        width: tiles.card-width; height: tiles.card-height;
-                        label: "开机启动"; value <=> root.autostart;
-                        enabled: root.connected && !root.sending;
+                    Setting {
+                        row: root.narrow ? 2 : 1; col: 0;
+                        label: "开机启动"; value <=> root.autostart; enabled: root.connected && !root.sending;
                         changed(value) => { root.command("autostart", value); }
                     }
-                    Rectangle {
-                        x: root.narrow ? 0px : tiles.card-width + 10px;
-                        y: (tiles.card-height + 10px) * (root.narrow ? 3 : 1);
-                        width: tiles.card-width; height: tiles.card-height;
-                            log-menu := ContextMenuArea {
-                                width: parent.width; height: parent.height;
-                                HorizontalLayout {
-                                    spacing: 0px;
-                                    Button { text: "打开日志"; vertical-stretch: 1; horizontal-stretch: 1; enabled: root.connected && !root.sending; clicked => { root.command("open_log", false); } }
-                                    Button { icon: Icons.chevron-down; icon-size: 12px; colorize-icon: true; width: 40px; vertical-stretch: 1; accessible-label: "日志菜单"; clicked => { root.preview-menu(); } }
-                                }
-                                Menu {
-                                    MenuItem { title: "复制诊断摘要"; enabled: root.connected && !root.sending; activated => { root.command("copy_diagnostics", false); } }
-                                    MenuItem { title: "打开日志文件夹"; enabled: root.connected && !root.sending; activated => { root.command("open_log_folder", false); } }
-                                    MenuSeparator {}
-                                    MenuItem { title: "组件许可"; activated => { attribution.show(); } }
-                                }
+                    log-menu := ContextMenuArea {
+                        row: root.narrow ? 3 : 1; col: root.narrow ? 0 : 1;
+                        height: 64px;
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        horizontal-stretch: 1;
+                        HorizontalBox {
+                            padding: 0px; spacing: 0px;
+                            Button { text: "打开日志"; vertical-stretch: 1; horizontal-stretch: 1; enabled: root.connected && !root.sending; clicked => { root.command("open_log", false); } }
+                            Button { icon: Icons.chevron-down; icon-size: 12px; colorize-icon: true; width: 40px; vertical-stretch: 1; accessible-label: "日志菜单"; clicked => { root.preview-menu(); } }
                         }
-                        attribution := PopupWindow {
-                            width: 280px;
-                            x: parent.width - self.width; y: -self.height - 6px;
-                            MenuFrame {
-                                VerticalLayout { padding: 12px; spacing: 8px; AboutSlint {} Button { text: "关闭"; clicked => { attribution.close(); } } }
-                            }
+                        Menu {
+                            MenuItem { title: "复制诊断摘要"; enabled: root.connected && !root.sending; activated => { root.command("copy_diagnostics", false); } }
+                            MenuItem { title: "打开日志文件夹"; enabled: root.connected && !root.sending; activated => { root.command("open_log_folder", false); } }
+                            MenuSeparator {}
+                            MenuItem { title: "组件许可"; activated => { attribution.show(); } }
                         }
                     }
                 }
-                if root.notice != "": Text { text: root.notice; color: Palette.foreground; wrap: word-wrap; }
+                if root.notice != "": Text { text: root.notice; color: Palette.foreground; wrap: word-wrap; vertical-stretch: 0; }
+                // Extra window height belongs here, never to text, cards or action buttons.
+                Rectangle { vertical-stretch: 1; }
             }
         }
         Button { text: "退出程序"; height: 34px; enabled: !root.sending; clicked => { root.command("exit", false); } }
+    }
+    attribution := PopupWindow {
+        width: min(320px, root.width - 40px);
+        height: min(300px, root.height - 40px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        MenuFrame {
+            VerticalBox {
+                padding: 12px; spacing: 8px;
+                ScrollView {
+                    horizontal-scrollbar-policy: always-off;
+                    viewport-width: self.visible-width;
+                    viewport-height: max(self.visible-height, license-content.min-height);
+                    license-content := AboutSlint {}
+                }
+                Button { text: "关闭"; clicked => { attribution.close(); } }
+            }
+        }
     }
 }

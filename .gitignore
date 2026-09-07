@@ -16,14 +16,11 @@
 /assets/export_icon.py
 /AGENTS.md
 /DESIGN.md
-/DEVELOPMENT.md
 /VALIDATION.md
 /RELEASE-NOTES.md
 /build-ui.ps1
-/measure-footprint.ps1
 /ui/
 /licenses/ui/
 /experiments/native-ui/README.md
 /experiments/native-ui/FLUENT-AUDIT.md
 /experiments/native-ui/FLUENT-RESEARCH.md
-/experiments/native-ui/vendor/PATCHES.md

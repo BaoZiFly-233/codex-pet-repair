@@ -1,11 +1,16 @@
-param([string]$CoreBinary, [string]$UiBinary, [string]$Toolchain = 'stable')
+param([string]$CoreBinary, [string]$UiBinary, [string]$Toolchain = 'stable', [string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $project = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$release = Join-Path $project 'dist\PetRepair-v1.0.0-windows-x64'
+$version = (Select-String -LiteralPath (Join-Path $project 'Cargo.toml') -Pattern '^version = "([^"]+)"$').Matches[0].Groups[1].Value
+$uiVersion = (Select-String -LiteralPath (Join-Path $PSScriptRoot 'Cargo.toml') -Pattern '^version = "([^"]+)"$').Matches[0].Groups[1].Value
+if ($version -ne $uiVersion) { throw 'Core and UI versions must match.' }
+$release = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $project "dist\PetRepair-v$version-windows-x64" }
+if (Test-Path -LiteralPath $release) { throw 'Use a new output directory; existing packages and user data are preserved.' }
 if (!$UiBinary) { $UiBinary = Join-Path $PSScriptRoot 'target\release\pet-repair-native-ui.exe' }
 if (!$CoreBinary) { $CoreBinary = Join-Path $project 'target\release\pet-repair.exe' }
 $binary = $UiBinary
 if (!(Test-Path -LiteralPath $binary)) { throw 'Build the native UI first.' }
+if (!(Test-Path -LiteralPath $CoreBinary)) { throw 'Build the core first.' }
 $dependencies = & cargo "+$Toolchain" tree --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') --locked --target x86_64-pc-windows-msvc -e normal,no-proc-macro --prefix none --no-dedupe --format '{p}' | Sort-Object -Unique
 if ($LASTEXITCODE -ne 0) { throw 'Dependency inventory failed.' }
 $metadata = & cargo "+$Toolchain" metadata --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc | ConvertFrom-Json
@@ -51,12 +56,19 @@ $coreTarget = Join-Path $release 'PetRepair.exe'
 if (!(Test-Path -LiteralPath $coreTarget) -or (Get-FileHash -LiteralPath $coreSource).Hash -ne (Get-FileHash -LiteralPath $coreTarget).Hash) {
     Copy-Item -LiteralPath $coreSource -Destination $coreTarget -Force
 }
-foreach ($document in @('README.md','CREDITS.md')) {
+foreach ($document in @('README.md','CREDITS.md','DEVELOPMENT.md','CHANGELOG.md','REFACTOR-VALIDATION.md')) {
     Copy-Item -LiteralPath (Join-Path $project $document) -Destination $release -Force
 }
 Copy-Item -LiteralPath (Join-Path $project 'LICENSE') -Destination $release -Force
 New-Item -ItemType Directory -Path (Join-Path $release 'assets') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $project 'assets\pet-repair-pixel.svg') -Destination (Join-Path $release 'assets') -Force
+New-Item -ItemType Directory -Path (Join-Path $release 'assets\screenshots') -Force | Out-Null
+foreach ($theme in @('light','dark')) {
+    Copy-Item -LiteralPath (Join-Path $project "assets\screenshots\$theme.png") -Destination (Join-Path $release 'assets\screenshots')
+}
+$patchNotes=Join-Path $release 'experiments\native-ui\vendor\PATCHES.md'
+New-Item -ItemType Directory -Path (Split-Path -Parent $patchNotes) -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'vendor\PATCHES.md') -Destination $patchNotes
 $coreLicenses=Join-Path $project 'licenses'
 foreach ($file in Get-ChildItem -LiteralPath $coreLicenses -File -Recurse | Where-Object { !$_.FullName.StartsWith($coreLicenses+'\ui\',[StringComparison]::OrdinalIgnoreCase) }) {
     $destination=Join-Path $release ([IO.Path]::GetRelativePath($project,$file.FullName))

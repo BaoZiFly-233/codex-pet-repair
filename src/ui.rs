@@ -1,8 +1,10 @@
 use crate::{
-    appearance, bridge,
+    bridge,
     native::{self, wide, Window},
     policy::Policy,
+    protocol::UiState,
     repair,
+    signal::Signal,
     storage::{self, Settings},
 };
 use std::{
@@ -15,16 +17,8 @@ use windows_sys::{
     core::w,
     Win32::{
         Foundation::*,
-        Graphics::Gdi::*,
         System::LibraryLoader::*,
-        UI::{
-            Accessibility::*,
-            Controls::*,
-            HiDpi::*,
-            Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus},
-            Shell::*,
-            WindowsAndMessaging::*,
-        },
+        UI::{Accessibility::*, Shell::*, WindowsAndMessaging::*},
     },
 };
 static ROOT: AtomicUsize = AtomicUsize::new(0);
@@ -44,18 +38,16 @@ const TRAY_ONLY: u16 = 112;
 const COPY_DIAGNOSTICS: u16 = 113;
 const OPEN_LOG_FOLDER: u16 = 114;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
+fn arm_event_batch(due: &mut Option<u64>, now: u64) -> bool {
+    if due.is_some() {
+        false
+    } else {
+        *due = Some(now + 300);
+        true
+    }
+}
 struct App {
     hwnd: HWND,
-    controls: Vec<(HWND, [i32; 4])>,
-    font: HFONT,
-    heading: HFONT,
-    status: HWND,
-    button: HWND,
-    auto: HWND,
-    start: HWND,
-    yes: HWND,
-    no: HWND,
-    preview: Option<std::path::PathBuf>,
     windows: Vec<Window>,
     discovery: native::Discovery,
     policy: Policy,
@@ -70,34 +62,28 @@ struct App {
     closing: bool,
     tray: bool,
     taskbar: u32,
-    last_scan: u64,
-    ignore_events_until: u64,
     icon: HICON,
     process_watches: Vec<native::ProcessWatch>,
-    focus: HWND,
     awaiting_confirmation: bool,
-    motions: std::collections::HashMap<usize, appearance::Motion>,
-    animations: bool,
-    headless: bool,
     ui_process: Option<std::process::Child>,
     wait_until: Option<u64>,
     last_operation: String,
     last_error: String,
+    action_error: Option<String>,
+    autostart: bool,
+    reconcile_pending: bool,
+    dirty: std::collections::HashSet<usize>,
+    events_due: Option<u64>,
+    state_signal: Option<Signal>,
+    published: Option<UiState>,
+    published_wait: Option<u64>,
+    revision: u64,
+    ui_queries: u64,
 }
 impl App {
     fn new() -> Self {
         Self {
             hwnd: null_mut(),
-            controls: Vec::new(),
-            font: null_mut(),
-            heading: null_mut(),
-            status: null_mut(),
-            button: null_mut(),
-            auto: null_mut(),
-            start: null_mut(),
-            yes: null_mut(),
-            no: null_mut(),
-            preview: None,
             windows: Vec::new(),
             discovery: Default::default(),
             policy: Default::default(),
@@ -112,221 +98,42 @@ impl App {
             closing: false,
             tray: false,
             taskbar: 0,
-            last_scan: 0,
-            ignore_events_until: 0,
             icon: null_mut(),
             process_watches: Vec::new(),
-            focus: null_mut(),
             awaiting_confirmation: false,
-            motions: Default::default(),
-            animations: false,
-            headless: false,
             ui_process: None,
             wait_until: None,
             last_operation: String::new(),
             last_error: String::new(),
+            action_error: None,
+            autostart: storage::autostart_enabled(),
+            reconcile_pending: false,
+            dirty: Default::default(),
+            events_due: None,
+            state_signal: Signal::new(Some(&crate::protocol::change_event(bridge::session()))).ok(),
+            published: None,
+            published_wait: None,
+            revision: 0,
+            ui_queries: 0,
         }
     }
     fn now(&self) -> u64 {
         self.clock.elapsed().as_millis() as u64
     }
-    unsafe fn child(
-        &mut self,
-        class: *const u16,
-        text: &str,
-        style: u32,
-        id: u16,
-        r: [i32; 4],
-    ) -> HWND {
-        let h = CreateWindowExW(
-            0,
-            class,
-            wide(text).as_ptr(),
-            WS_CHILD | WS_VISIBLE | style,
-            0,
-            0,
-            1,
-            1,
-            self.hwnd,
-            id as usize as HMENU,
-            GetModuleHandleW(null()),
-            null(),
-        );
-        self.controls.push((h, r));
-        h
-    }
     unsafe fn init(&mut self) {
-        self.animations = !self.headless && appearance::animations_enabled();
         self.icon = create_icon();
-        SendMessageW(
-            self.hwnd,
-            WM_SETICON,
-            ICON_SMALL as usize,
-            self.icon as isize,
-        );
-        SendMessageW(self.hwnd, WM_SETICON, ICON_BIG as usize, self.icon as isize);
-        if !self.headless {
-            appearance::frame(self.hwnd);
-            self.child(w!("STATIC"), "Codex 宠物修复", 0, 0, [24, 22, 276, 34]);
-            self.status = self.child(w!("STATIC"), "正在检测…", 0, 0, [44, 92, 312, 40]);
-            self.button = self.child(
-                w!("BUTTON"),
-                "立即修复",
-                WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
-                FIX,
-                [44, 144, 312, 40],
-            );
-            self.auto = self.child(
-                w!("BUTTON"),
-                "自动修复",
-                WS_TABSTOP | BS_CHECKBOX as u32,
-                AUTO,
-                [24, 220, 352, 48],
-            );
-            self.start = self.child(
-                w!("BUTTON"),
-                "开机启动",
-                WS_TABSTOP | BS_CHECKBOX as u32,
-                START,
-                [24, 272, 352, 48],
-            );
-            self.child(w!("BUTTON"), "详情", WS_TABSTOP, DETAIL, [312, 22, 64, 32]);
-            self.yes = self.child(
-                w!("BUTTON"),
-                "可以拖动",
-                WS_TABSTOP,
-                YES,
-                [44, 144, 150, 40],
-            );
-            self.no = self.child(
-                w!("BUTTON"),
-                "仍无法拖动",
-                WS_TABSTOP,
-                NO,
-                [206, 144, 150, 40],
-            );
-            SendMessageW(
-                self.auto,
-                BM_SETCHECK,
-                if self.settings.automatic {
-                    BST_CHECKED
-                } else {
-                    BST_UNCHECKED
-                } as usize,
-                0,
-            );
-            SendMessageW(
-                self.start,
-                BM_SETCHECK,
-                if storage::autostart_enabled() {
-                    BST_CHECKED
-                } else {
-                    BST_UNCHECKED
-                } as usize,
-                0,
-            );
-            self.feedback(false);
-            self.layout();
-        }
         self.taskbar = RegisterWindowMessageW(w!("TaskbarCreated"));
-        if self.preview.is_none() {
-            self.add_tray();
-        }
-        if self.preview.is_none() {
-            if let Some(r) = repair::recover_pending() {
-                storage::log(&format!("startup recovery {:?}", r));
-                self.last = Some(r);
-            }
+        self.add_tray();
+        if let Some(report) = repair::recover_pending() {
+            self.last = Some(report);
         }
         self.refresh(true);
-        if self.headless {
-            if let Err(e) = bridge::listen(self.hwnd as usize) {
-                self.say(&e);
-            }
+        if let Err(error) = bridge::listen(self.hwnd as usize) {
+            self.say(&error);
         }
         SetTimer(self.hwnd, 1, 10000, None);
-        if self.preview.is_some() {
-            SetTimer(self.hwnd, 4, 500, None);
-        }
-    }
-    unsafe fn layout(&mut self) {
-        let dpi = GetDpiForWindow(self.hwnd).max(96);
-        let scale = |v: i32| v * dpi as i32 / 96;
-        let old = self.font;
-        let old_h = self.heading;
-        self.font = CreateFontW(
-            -scale(15),
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            0,
-            0,
-            CLEARTYPE_QUALITY as u32,
-            0,
-            w!("Microsoft YaHei UI"),
-        );
-        self.heading = CreateFontW(
-            -scale(22),
-            0,
-            0,
-            0,
-            600,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            0,
-            0,
-            CLEARTYPE_QUALITY as u32,
-            0,
-            w!("Microsoft YaHei UI"),
-        );
-        for (i, (h, r)) in self.controls.iter().enumerate() {
-            MoveWindow(*h, scale(r[0]), scale(r[1]), scale(r[2]), scale(r[3]), 1);
-            SendMessageW(
-                *h,
-                WM_SETFONT,
-                if i == 0 { self.heading } else { self.font } as usize,
-                1,
-            );
-        }
-        if !old.is_null() {
-            DeleteObject(old);
-        }
-        if !old_h.is_null() {
-            DeleteObject(old_h);
-        }
-        InvalidateRect(self.hwnd, null(), 1);
-    }
-    unsafe fn feedback(&self, visible: bool) {
-        ShowWindow(self.button, if visible { SW_HIDE } else { SW_SHOW });
-        ShowWindow(self.yes, if visible { SW_SHOW } else { SW_HIDE });
-        ShowWindow(self.no, if visible { SW_SHOW } else { SW_HIDE });
-    }
-    unsafe fn paint(&self, dc: HDC) {
-        appearance::background(dc, self.hwnd);
-        if let Some(r) = &self.running {
-            appearance::progress(
-                dc,
-                self.hwnd,
-                (r.started.elapsed().as_secs_f32() / 3.0).min(0.98),
-            );
-        }
-    }
-    unsafe fn invalidate_progress(&self) {
-        let s = |v: i32| v * GetDpiForWindow(self.hwnd).max(96) as i32 / 96;
-        let r = RECT {
-            left: s(44),
-            top: s(134),
-            right: s(356),
-            bottom: s(138),
-        };
-        InvalidateRect(self.hwnd, &r, 0);
+        SetTimer(self.hwnd, 9, 30000, None);
+        self.schedule_automatic();
     }
     unsafe fn say(&mut self, message: &str) {
         let message = if !message.is_empty()
@@ -350,7 +157,6 @@ impl App {
         self.wait_until = None;
         if self.message != message {
             self.message = message.into();
-            SetWindowTextW(self.status, wide(message).as_ptr());
             let mut n = self.tray_data();
             copy_wide(&mut n.szTip, &format!("浮窗修复 · {message}"));
             n.uFlags = NIF_TIP;
@@ -402,6 +208,18 @@ impl App {
             if !hook.is_null() {
                 self.hooks.push(hook);
             }
+            let location = SetWinEventHook(
+                EVENT_OBJECT_LOCATIONCHANGE,
+                EVENT_OBJECT_LOCATIONCHANGE,
+                null_mut(),
+                Some(event_callback),
+                *pid,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            );
+            if !location.is_null() {
+                self.hooks.push(location);
+            }
             if let Some(w) = native::ProcessWatch::start(*pid, self.hwnd as usize, PROCESS_EXIT) {
                 self.process_watches.push(w);
             }
@@ -409,18 +227,29 @@ impl App {
         self.pids = pids;
     }
     unsafe fn refresh(&mut self, processes: bool) {
+        self.reconcile_pending |= processes;
         if self.running.is_some() {
             return;
         }
-        if processes {
+        if self.reconcile_pending {
             self.discovery.refresh_processes();
             self.sync_hooks();
+            self.windows = self.discovery.scan();
+            self.reconcile_pending = false;
+            self.dirty.clear();
+        } else {
+            // Window events only inspect their HWNDs. Timer decisions recheck cached candidates.
+            if self.dirty.is_empty() {
+                for w in &self.windows {
+                    self.dirty.insert(w.hwnd);
+                }
+            }
+            for hwnd in self.dirty.drain() {
+                self.discovery.update(hwnd);
+            }
+            self.windows = self.discovery.current();
         }
-        self.windows = self.discovery.scan();
-        let now = self.now();
-        self.policy.observe(&self.windows, now);
-        self.last_scan = now;
-        EnableWindow(self.button, (self.windows.len() == 1) as i32);
+        self.policy.observe(&self.windows, self.now());
         if self.awaiting_confirmation {
             return;
         }
@@ -432,10 +261,13 @@ impl App {
             });
         } else if self.windows.len() > 1 {
             self.say("检测到多个浮窗，请先隐藏其他浮窗");
-        } else if self.settings.automatic && self.preview.is_none() {
-            self.try_fix(false);
         } else if self.last.is_none() {
             self.say("可以修复 · 点击“立即修复”");
+        }
+    }
+    unsafe fn schedule_automatic(&mut self) {
+        if self.settings.automatic && self.windows.len() == 1 {
+            self.try_fix(false);
         }
     }
     unsafe fn try_fix(&mut self, manual: bool) {
@@ -504,15 +336,8 @@ impl App {
                 self.target = Some(w);
                 self.last = None;
                 self.awaiting_confirmation = false;
-                self.feedback(false);
-                EnableWindow(self.button, 1);
-                SetWindowTextW(self.button, w!("取消"));
-                EnableWindow(self.auto, 0);
                 self.say("正在修复 · 约需 3 秒，请暂时不要拖动宠物");
                 SetTimer(self.hwnd, 3, 100, None);
-                if self.animations {
-                    SetTimer(self.hwnd, 5, 16, None);
-                }
             }
             Err(e) => {
                 self.policy.halted = true;
@@ -536,11 +361,7 @@ impl App {
         };
         if let Some(result) = result {
             self.running = None;
-            self.invalidate_progress();
             KillTimer(self.hwnd, 3);
-            EnableWindow(self.button, 1);
-            EnableWindow(self.auto, 1);
-            SetWindowTextW(self.button, w!("立即修复"));
             if result.can_confirm() {
                 let verified = self
                     .target
@@ -555,8 +376,6 @@ impl App {
                     self.awaiting_confirmation = true;
                     self.policy.halted = true;
                     self.say("请检查修复效果 · 试着拖动宠物，再选择下面的结果");
-                    self.feedback(true);
-                    SetFocus(self.yes);
                 }
             } else if result.code == "cancelled_restored" {
                 if let Some(w) = &self.target {
@@ -577,7 +396,7 @@ impl App {
                 ));
             }
             self.last = Some(result);
-            self.ignore_events_until = self.now() + 2000;
+            self.refresh(false);
             if self.closing {
                 DestroyWindow(self.hwnd);
             }
@@ -585,14 +404,6 @@ impl App {
             r.cancel();
             self.say("修复超时，正在恢复原状");
         }
-    }
-    unsafe fn details(&self) {
-        MessageBoxW(
-            self.hwnd,
-            wide(&self.detail_text()).as_ptr(),
-            w!("恢复详情"),
-            MB_OK | MB_ICONINFORMATION,
-        );
     }
     unsafe fn open_log(&mut self) -> Result<(), String> {
         storage::event("DIAGNOSTICS_OPENED", None, "打开日志", &self.detail_text());
@@ -737,17 +548,72 @@ impl App {
     fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "message":self.status_text(),"automatic_status":self.automatic_status(),"automatic":self.settings.automatic,
-            "autostart":storage::autostart_enabled(),"tray_only":self.settings.tray_only,
+            "autostart":self.autostart,"tray_only":self.settings.tray_only,
             "busy":self.running.is_some(),"can_repair":self.windows.len()==1 && self.windows.first().is_some_and(|w|self.policy.manual_ready(w,self.now())),
             "awaiting_confirmation":self.awaiting_confirmation,
             "version":self.windows.first().map(|w|w.owner.version.as_str()),
             "elapsed_ms":self.running.as_ref().map(|r|r.started.elapsed().as_millis() as u64).unwrap_or(0),
-            "detail":self.detail_text(),"core_pid":std::process::id()
+            "detail":self.detail_text(),"core_pid":std::process::id(),
+            "metrics":{"process_scans":self.discovery.process_scans,"window_scans":self.discovery.window_scans,"window_checks":self.discovery.window_checks,"ui_queries":self.ui_queries}
         })
     }
+    fn light_state(&self) -> UiState {
+        let (status, hint) = self
+            .message
+            .split_once(" · ")
+            .unwrap_or((&self.message, ""));
+        UiState {
+            status: status.into(),
+            hint: hint.into(),
+            automatic_status: self.automatic_status().into(),
+            automatic: self.settings.automatic,
+            autostart: self.autostart,
+            tray_only: self.settings.tray_only,
+            busy: self.running.is_some(),
+            can_repair: self.running.is_none()
+                && self.windows.len() == 1
+                && self.policy.manual_ready(&self.windows[0], self.now()),
+            awaiting_confirmation: self.awaiting_confirmation,
+            revision: self.revision,
+            wait_remaining_ms: self.wait_until.unwrap_or(0).saturating_sub(self.now()),
+        }
+    }
+    unsafe fn publish(&mut self) {
+        let mut state = self.light_state();
+        state.revision = 0;
+        state.wait_remaining_ms = 0;
+        if self.published.as_ref() != Some(&state) || self.published_wait != self.wait_until {
+            self.revision = self.revision.wrapping_add(1);
+            self.published = Some(state);
+            self.published_wait = self.wait_until;
+            if let Some(signal) = &self.state_signal {
+                signal.set();
+            }
+        }
+        if self.running.is_none() {
+            let deadline = self
+                .windows
+                .first()
+                .and_then(|w| self.policy.next_manual_change(w, self.now()));
+            if let Some(deadline) = deadline {
+                SetTimer(
+                    self.hwnd,
+                    7,
+                    deadline.saturating_sub(self.now()).clamp(1, 300000) as u32,
+                    None,
+                );
+            } else {
+                KillTimer(self.hwnd, 7);
+            }
+        }
+    }
     unsafe fn bridge_command(&mut self, request: bridge::Request) -> serde_json::Value {
+        self.action_error = None;
         match request.command.as_str() {
-            "status" => {}
+            "status" => return self.snapshot(),
+            "ui_status" => {
+                self.ui_queries += 1;
+            }
             "repair" => self.command(FIX),
             "cancel" => {
                 if let Some(r) = &self.running {
@@ -806,7 +672,13 @@ impl App {
             }
             _ => return serde_json::json!({"error":"unknown_command"}),
         }
-        self.snapshot()
+        self.publish();
+        let mut reply = serde_json::to_value(self.light_state()).unwrap();
+        reply["message"] = self.status_text().into();
+        if let Some(error) = &self.action_error {
+            reply["error"] = error.clone().into();
+        }
+        reply
     }
     unsafe fn open_ui(&mut self) {
         if let Some(child) = &mut self.ui_process {
@@ -824,159 +696,106 @@ impl App {
         }
     }
     unsafe fn command(&mut self, id: u16) {
+        self.action_error = None;
+        if let Err(error) = self.perform_command(id) {
+            self.say(&error);
+            self.action_error = Some(error);
+        }
+        if !self.closing {
+            self.publish();
+        }
+    }
+    unsafe fn perform_command(&mut self, id: u16) -> Result<(), String> {
         match id {
             FIX => {
                 if let Some(r) = &self.running {
                     r.cancel();
                     self.say("正在取消…");
-                    return;
-                }
-                self.refresh(true);
-                self.try_fix(true);
-            }
-            AUTO => {
-                if self.running.is_some() {
-                    return;
-                }
-                let enabled = !self.settings.automatic;
-                self.settings.automatic = enabled;
-                if let Err(e) = self.settings.save() {
-                    self.settings.automatic = !enabled;
-                    SendMessageW(
-                        self.auto,
-                        BM_SETCHECK,
-                        if !enabled { BST_CHECKED } else { BST_UNCHECKED } as usize,
-                        0,
-                    );
-                    self.say(&e);
                 } else {
-                    SendMessageW(
-                        self.auto,
-                        BM_SETCHECK,
-                        if enabled { BST_CHECKED } else { BST_UNCHECKED } as usize,
-                        0,
-                    );
-                    storage::event(
-                        "SETTING_AUTOMATIC",
-                        None,
-                        "用户更改自动修复设置",
-                        if enabled {
-                            "自动修复：开启"
-                        } else {
-                            "自动修复：关闭"
-                        },
-                    );
-                    self.say(if enabled && self.policy.halted {
-                        "自动修复已暂停，请先手动修复"
-                    } else if enabled {
-                        "自动修复已开启"
-                    } else {
-                        "自动修复已关闭"
-                    });
                     self.refresh(true);
+                    self.try_fix(true);
+                }
+            }
+            AUTO | TOGGLE_AUTO => {
+                if self.running.is_some() {
+                    return Err("修复进行中，完成后可调整自动修复".into());
+                }
+                self.settings.automatic = !self.settings.automatic;
+                if let Err(error) = self.settings.save() {
+                    self.settings.automatic = !self.settings.automatic;
+                    return Err(error);
+                }
+                storage::event(
+                    "SETTING_AUTOMATIC",
+                    None,
+                    "用户更改自动修复设置",
+                    if self.settings.automatic {
+                        "自动修复：开启"
+                    } else {
+                        "自动修复：关闭"
+                    },
+                );
+                if !self.settings.automatic {
+                    KillTimer(self.hwnd, 2);
+                    self.say("自动修复已关闭");
+                } else {
+                    self.schedule_automatic();
                 }
             }
             START => {
-                let enabled = !storage::autostart_enabled();
-                if let Err(e) = storage::autostart(enabled) {
-                    SendMessageW(
-                        self.start,
-                        BM_SETCHECK,
-                        if !enabled { BST_CHECKED } else { BST_UNCHECKED } as usize,
-                        0,
-                    );
-                    self.say(&e);
-                } else {
-                    SendMessageW(
-                        self.start,
-                        BM_SETCHECK,
-                        if enabled { BST_CHECKED } else { BST_UNCHECKED } as usize,
-                        0,
-                    );
-                }
+                self.autostart = storage::autostart_enabled();
+                storage::autostart(!self.autostart)?;
+                self.autostart = storage::autostart_enabled();
             }
-            DETAIL => {
-                if self.headless {
-                    if let Err(e) = self.open_log() {
-                        self.say(&e);
-                    }
-                } else {
-                    self.details();
-                }
-            }
+            DETAIL => self.open_log()?,
             YES => {
-                if let Some(w) = &self.target {
-                    if self.last.as_ref().is_some_and(|r| r.can_confirm()) {
-                        let previous_versions = self.settings.verified_versions.clone();
-                        self.settings.confirm_version(&w.owner.version);
-                        if let Err(e) = self.settings.save() {
-                            self.settings.verified_versions = previous_versions;
-                            self.say(&e);
-                        } else {
-                            self.policy.complete(w);
-                            self.awaiting_confirmation = false;
-                            storage::event(
-                                "REPAIR_FEEDBACK",
-                                Some(&self.last_operation),
-                                "用户确认可以拖动",
-                                "已记录此客户端版本；自动修复开关保持原值",
-                            );
-                            self.say("已确认可以拖动");
-                            self.feedback(false);
-                            SetFocus(self.button);
-                        }
+                if let Some(w) = self.target.clone().filter(|_| {
+                    self.awaiting_confirmation
+                        && self.last.as_ref().is_some_and(|r| r.can_confirm())
+                }) {
+                    let versions = self.settings.verified_versions.clone();
+                    self.settings.confirm_version(&w.owner.version);
+                    if let Err(error) = self.settings.save() {
+                        self.settings.verified_versions = versions;
+                        return Err(error);
                     }
+                    self.policy.complete(&w);
+                    self.awaiting_confirmation = false;
+                    storage::event(
+                        "REPAIR_FEEDBACK",
+                        Some(&self.last_operation),
+                        "用户确认可以拖动",
+                        "已记录此客户端版本；自动修复开关保持原值",
+                    );
+                    self.say("已确认可以拖动");
                 }
             }
             NO => {
-                storage::event(
-                    "REPAIR_FEEDBACK",
-                    Some(&self.last_operation),
-                    "用户反馈仍无法拖动",
-                    "自动处理暂停，开关偏好保留",
-                );
-                self.policy.halted = true;
-                self.awaiting_confirmation = false;
-                self.say("自动修复已暂停");
-                self.feedback(false);
-                SetFocus(self.button);
-            }
-            OPEN => {
-                if self.headless {
-                    self.open_ui();
-                } else {
-                    ShowWindow(self.hwnd, SW_SHOW);
-                    SetForegroundWindow(self.hwnd);
+                if self.awaiting_confirmation {
+                    storage::event(
+                        "REPAIR_FEEDBACK",
+                        Some(&self.last_operation),
+                        "用户反馈仍无法拖动",
+                        "自动处理暂停，开关偏好保留",
+                    );
+                    self.policy.halted = true;
+                    self.awaiting_confirmation = false;
+                    self.say("自动修复已暂停 · 需要时可以再次手动修复");
                 }
             }
+            OPEN => self.open_ui(),
             TRAY_ONLY => {
-                let previous = self.settings.tray_only;
-                self.settings.tray_only = !previous;
-                if let Err(e) = self.settings.save() {
-                    self.settings.tray_only = previous;
-                    self.say(&e);
+                self.settings.tray_only = !self.settings.tray_only;
+                if let Err(error) = self.settings.save() {
+                    self.settings.tray_only = !self.settings.tray_only;
+                    return Err(error);
                 }
             }
-            COPY_DIAGNOSTICS => {
-                if let Err(e) = self.copy_diagnostics() {
-                    self.say(&e);
-                }
-            }
-            OPEN_LOG_FOLDER => {
-                if let Err(e) = self.open_log_folder() {
-                    self.say(&e);
-                }
-            }
-            TOGGLE_AUTO => {
-                if self.running.is_none() {
-                    self.command(AUTO);
-                }
-            }
+            COPY_DIAGNOSTICS => self.copy_diagnostics()?,
+            OPEN_LOG_FOLDER => self.open_log_folder()?,
             EXIT => {
-                if self.headless {
-                    if let Some(child) = &self.ui_process {
-                        EnumWindows(Some(close_ui_window), child.id() as isize);
-                    }
+                if let Some(child) = &self.ui_process {
+                    EnumWindows(Some(close_ui_window), child.id() as isize);
                 }
                 self.closing = true;
                 if let Some(r) = &self.running {
@@ -988,6 +807,7 @@ impl App {
             }
             _ => {}
         }
+        Ok(())
     }
     unsafe fn menu(&mut self) {
         let m = CreatePopupMenu();
@@ -1083,6 +903,7 @@ fn copy_wide(out: &mut [u16], s: &str) {
         *a = b;
     }
 }
+#[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCEW(1), not an address to dereference.
 unsafe fn create_icon() -> HICON {
     LoadImageW(
         GetModuleHandleW(null()),
@@ -1150,196 +971,91 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> is
             let delivery = Box::from_raw(lp as *mut bridge::Delivery);
             let result = app.bridge_command(delivery.request);
             let _ = delivery.reply.send(result);
-            0
         }
-        WM_CREATE => {
-            app.init();
-            0
-        }
-        WM_COMMAND => {
-            if (wp >> 16) == BN_CLICKED as usize {
-                app.command((wp & 0xffff) as u16);
-            }
-            0
-        }
-        WM_SETFOCUS => {
-            if !app.focus.is_null() && IsWindowVisible(app.focus) != 0 {
-                SetFocus(app.focus);
-            } else if !app.button.is_null() {
-                SetFocus(app.button);
-            }
-            0
-        }
-        WM_ACTIVATE => {
-            if wp & 0xffff == WA_INACTIVE as usize {
-                app.focus = GetFocus();
-            }
-            DefWindowProcW(hwnd, msg, wp, lp)
-        }
-        WM_NOTIFY => {
-            let header = &*(lp as *const NMHDR);
-            if header.code == NM_CUSTOMDRAW
-                && matches!(header.idFrom as u16, FIX | AUTO | START | DETAIL | YES | NO)
-            {
-                let draw = &*(lp as *const NMCUSTOMDRAW);
-                if draw.dwDrawStage != CDDS_PREPAINT {
-                    return CDRF_DODEFAULT as isize;
-                }
-                let target = appearance::control_state(draw);
-                let now = app.now();
-                let animate = app.animations && IsWindowVisible(hwnd) != 0;
-                let motion = app
-                    .motions
-                    .entry(header.hwndFrom as usize)
-                    .or_insert_with(|| appearance::Motion::new(target));
-                let values = motion.update(target, now, animate);
-                if motion.active(now) {
-                    SetTimer(hwnd, 5, 16, None);
-                }
-                appearance::button(
-                    draw,
-                    app.font,
-                    header.idFrom == FIX as usize,
-                    matches!(header.idFrom as u16, AUTO | START),
-                    values,
-                )
-            } else {
-                DefWindowProcW(hwnd, msg, wp, lp)
-            }
-        }
-        WM_ERASEBKGND => {
-            app.paint(wp as HDC);
-            1
-        }
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = zeroed();
-            let dc = BeginPaint(hwnd, &mut ps);
-            app.paint(dc);
-            EndPaint(hwnd, &ps);
-            0
-        }
-        WM_PRINTCLIENT => {
-            app.paint(wp as HDC);
-            0
-        }
-        WM_CTLCOLORSTATIC => appearance::static_color(wp as HDC, lp as HWND == app.status),
-        WM_SETTINGCHANGE | WM_THEMECHANGED => {
-            app.animations = !app.headless && appearance::animations_enabled();
-            appearance::frame(hwnd);
-            RedrawWindow(
-                hwnd,
-                null(),
-                null_mut(),
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
-            );
-            0
-        }
-        WM_TIMER => {
-            match wp {
-                1 => {
-                    if let Some(child) = &mut app.ui_process {
-                        if let Ok(Some(status)) = child.try_wait() {
-                            if !status.success() {
-                                storage::log(&format!("UI exited: {status}"));
-                            }
-                            app.ui_process = None;
-                        }
-                    }
-                    if app.discovery.owners.is_empty()
-                        || app.now().saturating_sub(app.last_scan) >= 30000
-                    {
-                        app.refresh(true);
+        WM_CREATE => app.init(),
+        WM_COMMAND => app.command((wp & 0xffff) as u16),
+        WM_TIMER => match wp {
+            1 => {
+                if let Some(child) = &mut app.ui_process {
+                    if child.try_wait().ok().flatten().is_some() {
+                        app.ui_process = None;
                     }
                 }
-                2 => {
-                    KillTimer(hwnd, 2);
+                app.autostart = storage::autostart_enabled();
+                if app.discovery.owners.is_empty() {
+                    app.refresh(true);
+                    app.schedule_automatic();
+                }
+            }
+            2 => {
+                KillTimer(hwnd, 2);
+                app.refresh(false);
+                app.schedule_automatic();
+            }
+            3 => app.poll_result(),
+            6 => {
+                KillTimer(hwnd, 6);
+                app.command(EXIT);
+            }
+            7 => {
+                KillTimer(hwnd, 7);
+                if app.wait_until.is_some_and(|deadline| deadline <= app.now())
+                    && !app.awaiting_confirmation
+                {
                     app.refresh(false);
-                }
-                3 => {
-                    app.poll_result();
-                    app.invalidate_progress();
-                }
-                5 => {
-                    let now = app.now();
-                    for control in app.motions.keys() {
-                        InvalidateRect(*control as HWND, null(), 0);
+                    if app.windows.len() == 1 {
+                        app.say("等待已结束 · 可以点击“立即修复”");
                     }
-                    app.invalidate_progress();
-                    if !app.animations
-                        || IsWindowVisible(hwnd) == 0
-                        || (app.running.is_none() && !app.motions.values().any(|m| m.active(now)))
-                    {
-                        KillTimer(hwnd, 5);
-                    }
+                    app.schedule_automatic();
                 }
-                6 => {
-                    KillTimer(hwnd, 6);
-                    app.command(EXIT);
-                }
-                4 => {
-                    KillTimer(hwnd, 4);
-                    if let Some(path) = &app.preview {
-                        if let Err(e) = appearance::preview(hwnd, path) {
-                            storage::log(&format!("UI preview: {e}"));
-                        }
-                        app.command(EXIT);
-                    }
-                }
-                _ => {}
             }
-            0
-        }
+            8 => {
+                KillTimer(hwnd, 8);
+                app.events_due = None;
+                app.refresh(false);
+                app.schedule_automatic();
+            }
+            9 => {
+                if !app.discovery.owners.is_empty() {
+                    app.refresh(true);
+                    app.schedule_automatic();
+                }
+            }
+            _ => {}
+        },
         EVENT => {
-            if app.running.is_none() && app.now() >= app.ignore_events_until {
-                if wp as u32 == EVENT_OBJECT_HIDE || wp as u32 == EVENT_OBJECT_DESTROY {
-                    app.policy.forget_hwnd(lp as usize);
+            let target = lp as usize;
+            if target != 0 {
+                app.dirty.insert(target);
+                if wp as u32 == EVENT_OBJECT_DESTROY
+                    || (wp as u32 == EVENT_OBJECT_HIDE && app.running.is_none())
+                {
+                    app.policy.forget_hwnd(target);
                 }
-                SetTimer(hwnd, 2, 300, None);
+                let now = app.now();
+                if arm_event_batch(&mut app.events_due, now) {
+                    SetTimer(hwnd, 8, 300, None);
+                }
             }
-            0
         }
         PROCESS_EXIT => {
             app.refresh(true);
-            0
+            app.schedule_automatic();
         }
-        TRAY => {
-            match (lp as u32) & 0xffff {
-                WM_CONTEXTMENU => app.menu(),
-                NIN_SELECT | NIN_KEYSELECT => app.command(OPEN),
-                _ => {}
-            }
-            0
-        }
-        WM_DPICHANGED => {
-            let r = &*(lp as *const RECT);
-            SetWindowPos(
-                hwnd,
-                null_mut(),
-                r.left,
-                r.top,
-                r.right - r.left,
-                r.bottom - r.top,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-            app.layout();
-            0
-        }
+        TRAY => match (lp as u32) & 0xffff {
+            WM_CONTEXTMENU => app.menu(),
+            NIN_SELECT | NIN_KEYSELECT => app.command(OPEN),
+            _ => {}
+        },
         WM_DISPLAYCHANGE | WM_POWERBROADCAST => {
+            app.reconcile_pending = true;
             SetTimer(hwnd, 2, 2100, None);
-            DefWindowProcW(hwnd, msg, wp, lp)
         }
-        WM_CLOSE => {
-            if app.tray {
-                ShowWindow(hwnd, SW_HIDE);
-            } else {
-                app.command(EXIT);
-            }
-            0
-        }
+        WM_CLOSE => app.command(EXIT),
         WM_DESTROY => {
             ROOT.store(0, Ordering::Relaxed);
-            for h in app.hooks.drain(..) {
-                UnhookWinEvent(h);
+            for hook in app.hooks.drain(..) {
+                UnhookWinEvent(hook);
             }
             app.process_watches.clear();
             if app.tray {
@@ -1348,56 +1064,45 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> is
             if let Some(r) = &app.running {
                 r.cancel();
             }
-            DeleteObject(app.font);
-            DeleteObject(app.heading);
             DestroyIcon(app.icon);
             PostQuitMessage(0);
-            0
+            return 0;
         }
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
+        _ => return DefWindowProcW(hwnd, msg, wp, lp),
     }
+    if !app.closing {
+        app.publish();
+    }
+    0
 }
-pub fn run(tray: bool, preview: Option<std::path::PathBuf>, legacy: bool, force_ui: bool) {
+pub fn run(tray: bool, force_ui: bool) {
     unsafe {
         let _gate = match native::Gate::acquire("Local\\CodexPetRepairGuiV1") {
-            Ok(g) => g,
+            Ok(gate) => gate,
             Err(_) => {
-                let h = FindWindowW(w!("PetRepair.Main"), null());
-                if !h.is_null() && !tray {
-                    PostMessageW(h, WM_COMMAND, OPEN as usize, 0);
+                let hwnd = FindWindowW(w!("PetRepair.Main"), null());
+                if !hwnd.is_null() && !tray {
+                    PostMessageW(hwnd, WM_COMMAND, OPEN as usize, 0);
                 }
                 return;
             }
         };
         let instance = GetModuleHandleW(null());
-        let mut wc: WNDCLASSW = zeroed();
-        wc.lpfnWndProc = Some(proc);
-        wc.hInstance = instance;
-        wc.lpszClassName = w!("PetRepair.Main");
-        wc.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
-        wc.hbrBackground = (COLOR_WINDOW + 1) as usize as HBRUSH;
-        RegisterClassW(&wc);
+        let mut class: WNDCLASSW = zeroed();
+        class.lpfnWndProc = Some(proc);
+        class.hInstance = instance;
+        class.lpszClassName = w!("PetRepair.Main");
+        RegisterClassW(&class);
         let mut app = Box::new(App::new());
-        app.headless = preview.is_none() && !legacy;
-        app.preview = preview;
-        let dpi = GetDpiForSystem().max(96);
-        let mut r = RECT {
-            left: 0,
-            top: 0,
-            right: 400 * dpi as i32 / 96,
-            bottom: 344 * dpi as i32 / 96,
-        };
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-        AdjustWindowRectExForDpi(&mut r, style, 0, 0, dpi);
         let hwnd = CreateWindowExW(
             0,
             w!("PetRepair.Main"),
             w!("Codex 宠物修复"),
-            style,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            r.right - r.left,
-            r.bottom - r.top,
+            0,
+            0,
+            0,
+            0,
+            0,
             null_mut(),
             null_mut(),
             instance,
@@ -1406,22 +1111,50 @@ pub fn run(tray: bool, preview: Option<std::path::PathBuf>, legacy: bool, force_
         if hwnd.is_null() {
             return;
         }
-        if !tray {
-            if app.headless {
-                if force_ui || (!app.settings.tray_only && bridge::ui_path().is_file()) {
-                    app.open_ui();
-                }
-            } else {
-                ShowWindow(hwnd, SW_SHOW);
-                SetFocus(app.button);
-            }
+        if !tray && (force_ui || !app.settings.tray_only) {
+            app.open_ui();
         }
-        let mut msg: MSG = zeroed();
-        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            if IsDialogMessageW(hwnd, &msg) == 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
+        let mut message: MSG = zeroed();
+        while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn event_storm_keeps_first_deadline() {
+        let mut due = None;
+        assert!(arm_event_batch(&mut due, 1000));
+        for time in 1001..5000 {
+            assert!(!arm_event_batch(&mut due, time));
+        }
+        assert_eq!(due, Some(1300));
+        due = None;
+        assert!(arm_event_batch(&mut due, 5000));
+        assert_eq!(due, Some(5300));
+    }
+    #[test]
+    fn busy_repair_defers_events_and_full_reconciliation() {
+        let mut app = App::new();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.running = Some(repair::Running {
+            operation_id: "test".into(),
+            input: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            result: rx,
+            started: Instant::now(),
+            worker_pid: 0,
+        });
+        app.dirty.extend([10, 20]);
+        unsafe {
+            app.refresh(true);
+        }
+        assert!(app.reconcile_pending);
+        assert_eq!(app.dirty.len(), 2);
+        assert_eq!(app.discovery.process_scans, 0);
+        assert_eq!(app.discovery.window_scans, 0);
     }
 }

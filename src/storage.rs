@@ -187,8 +187,7 @@ mod tests {
     #[test]
     fn prior_settings_keep_preferences_with_optional_tray_mode() {
         let mut settings: Settings =
-            serde_json::from_str(r#"{"automatic":true,"verified_versions":["1.2.3.0"]}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"automatic":true,"verified_versions":["1.2.3.0"]}"#).unwrap();
         assert!(!settings.tray_only);
         settings.tray_only = true;
         let saved = serde_json::to_string(&settings).unwrap();

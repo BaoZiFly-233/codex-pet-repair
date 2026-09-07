@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use crate::protocol::UiState;
 use std::{
     fs::{File, OpenOptions},
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
@@ -10,18 +10,28 @@ use windows_sys::Win32::{
     System::{Pipes::*, RemoteDesktop::*, Threading::*, IO::*},
 };
 
-#[derive(Default, Deserialize)]
-#[serde(default)]
-pub struct State {
-    pub message: String,
-    pub automatic_status: String,
-    pub automatic: bool,
-    pub autostart: bool,
-    pub tray_only: bool,
-    pub busy: bool,
-    pub can_repair: bool,
-    pub awaiting_confirmation: bool,
-    pub error: Option<String>,
+#[derive(Debug)]
+pub enum Error {
+    Connection(String),
+    Action(String, Option<UiState>),
+}
+impl From<String> for Error {
+    fn from(value: String) -> Self {
+        Self::Connection(value)
+    }
+}
+impl From<&str> for Error {
+    fn from(value: &str) -> Self {
+        Self::Connection(value.into())
+    }
+}
+
+pub fn session() -> u32 {
+    let mut session = 0;
+    unsafe {
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut session);
+    }
+    session
 }
 
 fn transfer(
@@ -36,8 +46,10 @@ fn transfer(
             return Err("无法准备后台通信".into());
         }
         let handle = file.as_raw_handle() as HANDLE;
-        let mut overlapped = OVERLAPPED::default();
-        overlapped.hEvent = event;
+        let mut overlapped = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
         let mut done = 0;
         let ok = if write {
             WriteFile(
@@ -79,8 +91,8 @@ fn transfer(
     }
 }
 
-// Evaluation client: I/O runs on one worker; the rendering thread never waits for the pipe.
-pub fn send(command: &str, enabled: bool) -> Result<State, String> {
+// All I/O runs on one worker; the rendering thread never waits for the pipe.
+pub fn send(command: &str, enabled: bool) -> Result<UiState, Error> {
     let mut session = 0;
     unsafe {
         if ProcessIdToSessionId(GetCurrentProcessId(), &mut session) == 0 {
@@ -158,12 +170,108 @@ pub fn send(command: &str, enabled: bool) -> Result<State, String> {
             return Err("后台响应过长".into());
         }
         if newline.is_some() {
-            let state: State = serde_json::from_slice(&bytes).map_err(|_| "后台响应格式无效")?;
-            if let Some(error) = state.error.as_ref() {
-                return Err(error.clone());
-            }
-            return Ok(state);
+            return decode(&bytes);
         }
     }
     Err("后台响应过长".into())
+}
+
+fn decode(bytes: &[u8]) -> Result<UiState, Error> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| "后台响应格式无效")?;
+    let state = value
+        .get("status")
+        .map(|_| serde_json::from_value::<UiState>(value.clone()))
+        .transpose()
+        .map_err(|_| "后台状态格式无效")?;
+    if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+        return Err(Error::Action(error.into(), state));
+    }
+    state
+        .ok_or_else(|| Error::Connection("后台版本不匹配，请使用同一候选包中的主程序和界面".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn timed_out_read_is_cancelled_and_the_pipe_remains_usable() {
+        use std::{io::Write, os::windows::io::FromRawHandle, sync::mpsc};
+        let name = format!("\\\\.\\pipe\\PetRepair-io-test-{}", std::process::id());
+        let wide: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
+        let handle = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1,
+                1024,
+                1024,
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        let mut server = unsafe { File::from_raw_handle(handle.cast()) };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            unsafe {
+                let connected =
+                    ConnectNamedPipe(server.as_raw_handle().cast(), std::ptr::null_mut());
+                assert!(connected != 0 || GetLastError() == ERROR_PIPE_CONNECTED);
+            }
+            ready_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            server.write_all(b"ok\n").unwrap();
+            unsafe {
+                FlushFileBuffers(server.as_raw_handle().cast());
+            }
+        });
+        let client = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_OVERLAPPED)
+            .open(name)
+            .unwrap();
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut bytes = [0u8; 16];
+        let started = Instant::now();
+        let result = transfer(
+            &client,
+            &mut bytes,
+            false,
+            started + Duration::from_millis(50),
+        );
+        assert!(result.unwrap_err().contains("超时"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        finish_tx.send(()).unwrap();
+        let count = transfer(
+            &client,
+            &mut bytes,
+            false,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(&bytes[..count], b"ok\n");
+        worker.join().unwrap();
+    }
+    #[test]
+    fn action_errors_preserve_authoritative_settings() {
+        let result = decode(br#"{"status":"failed","automatic":false,"error":"save failed"}"#);
+        assert!(matches!(
+            result,
+            Err(Error::Action(
+                _,
+                Some(UiState {
+                    automatic: false,
+                    ..
+                })
+            ))
+        ));
+        assert!(matches!(
+            decode(br#"{"error":"clipboard busy"}"#),
+            Err(Error::Action(_, None))
+        ));
+        assert!(matches!(decode(b"broken"), Err(Error::Connection(_))));
+    }
 }

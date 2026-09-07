@@ -107,9 +107,22 @@ fn owner(pid: u32, test: bool) -> Result<Owner, String> {
     {
         return Err("not_official_package".into());
     }
+    let version = official_version(&path, &text(&buf)).ok_or("unsupported_path")?;
+    Ok(Owner {
+        pid,
+        start: process_start(p.0)?,
+        version,
+        path,
+        test: false,
+    })
+}
+fn official_version(path: &str, family: &str) -> Option<String> {
     let lower = path.to_ascii_lowercase();
-    if !lower.ends_with("\\app\\chatgpt.exe") || !lower.contains("\\windowsapps\\openai.codex_") {
-        return Err("unsupported_path".into());
+    if family != "OpenAI.Codex_2p2nqsd0c76g0"
+        || !lower.ends_with("\\app\\chatgpt.exe")
+        || !lower.contains("\\windowsapps\\openai.codex_")
+    {
+        return None;
     }
     let version = lower
         .split("openai.codex_")
@@ -119,13 +132,7 @@ fn owner(pid: u32, test: bool) -> Result<Owner, String> {
         .next()
         .unwrap_or("")
         .to_string();
-    Ok(Owner {
-        pid,
-        start: process_start(p.0)?,
-        version,
-        path,
-        test: false,
-    })
+    (!version.is_empty()).then_some(version)
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Window {
@@ -134,9 +141,44 @@ pub struct Window {
     pub rect: [i32; 4],
     pub style: u32,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WindowKey {
+    pub pid: u32,
+    pub start: u64,
+    pub hwnd: usize,
+}
 impl Window {
-    pub fn key(&self) -> String {
-        format!("{}:{}:{}", self.owner.pid, self.owner.start, self.hwnd)
+    pub fn key(&self) -> WindowKey {
+        WindowKey {
+            pid: self.owner.pid,
+            start: self.owner.start,
+            hwnd: self.hwnd,
+        }
+    }
+}
+
+/// Hold the validated process object, so PID reuse cannot pass a transaction check.
+pub struct TargetGuard {
+    process: Handle,
+    key: WindowKey,
+}
+impl TargetGuard {
+    pub fn new(window: &Window) -> Result<Self, String> {
+        let process = Handle::process(window.owner.pid)?;
+        if !process.alive() || process_start(process.0)? != window.owner.start || !same(window) {
+            return Err("target_changed".into());
+        }
+        Ok(Self {
+            process,
+            key: window.key(),
+        })
+    }
+    pub fn matches(&self, marker: &str) -> bool {
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(self.key.hwnd as HWND, &mut pid);
+        }
+        self.process.alive() && pid == self.key.pid && marker_matches(self.key.hwnd, marker)
     }
 }
 pub fn style(hwnd: usize) -> Result<u32, String> {
@@ -235,38 +277,115 @@ pub fn desktop() -> bool {
 #[derive(Default)]
 pub struct Discovery {
     pub owners: HashMap<u32, Owner>,
+    handles: HashMap<u32, Handle>,
+    windows: HashMap<usize, Window>,
+    pub process_scans: u64,
+    pub window_scans: u64,
+    pub window_checks: u64,
 }
 impl Discovery {
     pub fn refresh_processes(&mut self) {
+        self.process_scans += 1;
         let mut found = HashMap::new();
         unsafe {
-            let h = Handle(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
-            if h.0 == INVALID_HANDLE_VALUE {
+            let snapshot = Handle(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+            if snapshot.0 == INVALID_HANDLE_VALUE {
                 return;
             }
             let mut p: PROCESSENTRY32W = zeroed();
             p.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-            let mut ok = Process32FirstW(h.0, &mut p);
+            let mut ok = Process32FirstW(snapshot.0, &mut p);
             while ok != 0 {
                 if text(&p.szExeFile).eq_ignore_ascii_case("ChatGPT.exe") {
-                    let cached = self.owners.get(&p.th32ProcessID).filter(|o| {
-                        Handle::process(o.pid)
-                            .is_ok_and(|p| p.alive() && process_start(p.0).ok() == Some(o.start))
-                    });
-                    if let Some(o) = cached
-                        .cloned()
-                        .or_else(|| owner(p.th32ProcessID, false).ok())
-                    {
-                        found.insert(o.pid, o);
+                    let pid = p.th32ProcessID;
+                    let cached = self
+                        .owners
+                        .get(&pid)
+                        .filter(|_| self.handles.get(&pid).is_some_and(Handle::alive));
+                    if let Some(o) = cached.cloned().or_else(|| owner(pid, false).ok()) {
+                        if !self.handles.get(&pid).is_some_and(Handle::alive) {
+                            if let Ok(handle) = Handle::process(pid) {
+                                if process_start(handle.0).ok() == Some(o.start) {
+                                    self.handles.insert(pid, handle);
+                                }
+                            }
+                        }
+                        if self.handles.get(&pid).is_some_and(Handle::alive) {
+                            found.insert(pid, o);
+                        }
                     }
                 }
-                ok = Process32NextW(h.0, &mut p);
+                ok = Process32NextW(snapshot.0, &mut p);
             }
         }
+        self.handles.retain(|pid, _| found.contains_key(pid));
         self.owners = found;
     }
-    pub fn scan(&self) -> Vec<Window> {
-        scan_owners(&self.owners)
+    pub fn scan(&mut self) -> Vec<Window> {
+        self.window_scans += 1;
+        self.windows = scan_owners(&self.owners)
+            .into_iter()
+            .map(|w| (w.hwnd, w))
+            .collect();
+        self.current()
+    }
+    pub fn update(&mut self, hwnd: usize) {
+        self.window_checks += 1;
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd as HWND, &mut pid);
+        }
+        let window = self
+            .owners
+            .get(&pid)
+            .filter(|_| self.handles.get(&pid).is_some_and(Handle::alive))
+            .and_then(|o| inspect_window(o, hwnd));
+        if let Some(window) = window {
+            self.windows.insert(hwnd, window);
+        } else {
+            self.windows.remove(&hwnd);
+        }
+    }
+    pub fn current(&self) -> Vec<Window> {
+        let mut windows: Vec<_> = self.windows.values().cloned().collect();
+        windows.sort_unstable_by_key(|w| w.hwnd);
+        windows
+    }
+}
+/// Shared strict classifier, also used immediately before a repair mutation.
+pub fn inspect_window(o: &Owner, hwnd: usize) -> Option<Window> {
+    unsafe {
+        let hwnd = hwnd as HWND;
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != o.pid || IsWindowVisible(hwnd) == 0 {
+            return None;
+        }
+        let mut class = [0u16; 256];
+        GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+        let expected = if o.test {
+            "PetRepair.TestOverlay"
+        } else {
+            "Chrome_WidgetWin_1"
+        };
+        if text(&class) != expected {
+            return None;
+        }
+        let style = style(hwnd as usize).ok()?;
+        let mask = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
+        if style & mask != mask {
+            return None;
+        }
+        let mut r: RECT = zeroed();
+        if GetWindowRect(hwnd, &mut r) == 0 || r.right <= r.left || r.bottom <= r.top {
+            return None;
+        }
+        Some(Window {
+            hwnd: hwnd as usize,
+            owner: o.clone(),
+            style,
+            rect: [r.left, r.top, r.right, r.bottom],
+        })
     }
 }
 pub fn scan_test(pid: u32) -> Vec<Window> {
@@ -284,47 +403,23 @@ fn scan_owners(owners: &HashMap<u32, Owner>) -> Vec<Window> {
         let data = &mut *(l as *mut Data);
         let mut pid = 0;
         GetWindowThreadProcessId(hwnd, &mut pid);
-        let Some(o) = data.owners.get(&pid) else {
-            return 1;
-        };
-        if IsWindowVisible(hwnd) == 0 {
-            return 1;
+        if let Some(window) = data
+            .owners
+            .get(&pid)
+            .and_then(|o| inspect_window(o, hwnd as usize))
+        {
+            data.windows.push(window);
         }
-        let mut class = [0; 256];
-        GetClassNameW(hwnd, class.as_mut_ptr(), 256);
-        let expected = if o.test {
-            "PetRepair.TestOverlay"
-        } else {
-            "Chrome_WidgetWin_1"
-        };
-        if text(&class) != expected {
-            return 1;
-        }
-        let Ok(s) = style(hwnd as usize) else {
-            return 1;
-        };
-        let mask = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
-        if s & mask != mask {
-            return 1;
-        }
-        let mut r: RECT = zeroed();
-        if GetWindowRect(hwnd, &mut r) == 0 || r.right <= r.left || r.bottom <= r.top {
-            return 1;
-        }
-        data.windows.push(Window {
-            hwnd: hwnd as usize,
-            owner: o.clone(),
-            style: s,
-            rect: [r.left, r.top, r.right, r.bottom],
-        });
         1
     }
     let mut data = Data {
         owners,
         windows: Vec::new(),
     };
-    unsafe {
-        EnumWindows(Some(callback), &mut data as *mut _ as isize);
+    if !owners.is_empty() {
+        unsafe {
+            EnumWindows(Some(callback), &mut data as *mut _ as isize);
+        }
     }
     data.windows
 }
@@ -381,6 +476,7 @@ pub struct ProcessWatch {
     stop: Handle,
     thread: Option<std::thread::JoinHandle<()>>,
 }
+
 impl ProcessWatch {
     pub fn start(pid: u32, window: usize, message: u32) -> Option<Self> {
         let stop = Handle(unsafe { CreateEventW(null(), 1, 0, null()) });
@@ -413,6 +509,29 @@ impl Drop for ProcessWatch {
         }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn official_identity_requires_package_and_path() {
+        let path = r"C:\Program Files\WindowsApps\OpenAI.Codex_26.901.1.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe";
+        assert_eq!(
+            official_version(path, "OpenAI.Codex_2p2nqsd0c76g0").as_deref(),
+            Some("26.901.1.0")
+        );
+        for (path, family) in [
+            (path, "Other.App_2p2nqsd0c76g0"),
+            (r"C:\Temp\app\ChatGPT.exe", "OpenAI.Codex_2p2nqsd0c76g0"),
+            (
+                r"C:\WindowsApps\OpenAI.Codex_1_x64\app\other.exe",
+                "OpenAI.Codex_2p2nqsd0c76g0",
+            ),
+        ] {
+            assert!(official_version(path, family).is_none());
         }
     }
 }

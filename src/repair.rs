@@ -180,15 +180,8 @@ fn worker_inner() -> Result<Report, String> {
     if !native::same(&request.window) || !input_ready(&request.window) {
         return Err("目标或输入状态改变，请稍后重试".into());
     }
-    // Re-enumerate to validate class and visibility immediately before mutation.
-    let current = if request.window.owner.test {
-        native::scan_test(request.window.owner.pid)
-    } else {
-        let mut d = native::Discovery::default();
-        d.refresh_processes();
-        d.scan()
-    };
-    if !current.iter().any(|w| w.key() == request.window.key()) {
+    // Validate just this window; identity has already passed the official package check.
+    if native::inspect_window(&request.window.owner, request.window.hwnd).is_none() {
         return Err("window_changed".into());
     }
     let original = native::style(request.window.hwnd)?;
@@ -220,9 +213,13 @@ fn worker_inner() -> Result<Report, String> {
     if line.trim() != "go" || !parent.alive() {
         return Err("cancelled_before_change".into());
     }
-    if !native::same(&transaction.window) || !input_ready(&transaction.window) {
+    if !native::same(&transaction.window)
+        || !input_ready(&transaction.window)
+        || native::inspect_window(&transaction.window.owner, transaction.window.hwnd).is_none()
+    {
         return Err("准备期间目标或输入状态改变".into());
     }
+    let target_guard = native::TargetGuard::new(&transaction.window)?;
     let cancel = Arc::new(AtomicBool::new(false));
     let c = cancel.clone();
     thread::spawn(move || {
@@ -241,7 +238,7 @@ fn worker_inner() -> Result<Report, String> {
         // Only losing the interactive desktop requires immediate restoration.
         } else if !native::desktop() {
             Some("input_interrupted_restored")
-        } else if !native::same(&transaction.window) {
+        } else if !target_guard.matches(&transaction.marker) {
             Some("target_changed")
         } else {
             None

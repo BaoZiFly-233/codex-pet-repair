@@ -1,9 +1,9 @@
-use crate::native::Window;
+use crate::native::{Window, WindowKey};
 use std::collections::{HashMap, VecDeque};
 
 #[derive(Default)]
 pub struct Policy {
-    windows: HashMap<String, Record>,
+    windows: HashMap<WindowKey, Record>,
     attempts: VecDeque<u64>,
     pub halted: bool,
 }
@@ -56,8 +56,7 @@ impl Policy {
         }
     }
     pub fn forget_hwnd(&mut self, hwnd: usize) {
-        self.windows
-            .retain(|key, _| !key.ends_with(&format!(":{hwnd}")));
+        self.windows.retain(|key, _| key.hwnd != hwnd);
     }
     pub fn allow(&mut self, w: &Window, now: u64, manual: bool) -> Result<(), Block> {
         while self
@@ -109,16 +108,32 @@ impl Policy {
                 .filter(|n| now.saturating_sub(**n) < 300_000)
                 .count()
                 < 3
-            && !self
+            && self
                 .attempts
                 .back()
-                .is_some_and(|n| now.saturating_sub(*n) < 10_000)
+                .is_none_or(|n| now.saturating_sub(*n) >= 10_000)
     }
     pub fn complete(&mut self, w: &Window) {
         if let Some(r) = self.windows.get_mut(&w.key()) {
             r.completed = true;
         }
         self.halted = false;
+    }
+    pub fn next_manual_change(&self, w: &Window, now: u64) -> Option<u64> {
+        let mut deadline = self.windows.get(&w.key())?.since + 2000;
+        if let Some(last) = self.attempts.back() {
+            deadline = deadline.max(last + 10000);
+        }
+        let mut recent = self
+            .attempts
+            .iter()
+            .filter(|t| now.saturating_sub(**t) < 300000);
+        if let Some(first) = recent.next() {
+            if recent.count() >= 2 {
+                deadline = deadline.max(first + 300000);
+            }
+        }
+        (deadline > now).then_some(deadline)
     }
 }
 
@@ -219,6 +234,20 @@ mod tests {
             p.forget_hwnd(w.hwnd);
         }
         assert!(p.windows.is_empty());
+    }
+    #[test]
+    fn manual_wakeup_tracks_real_deadlines() {
+        let mut p = Policy::default();
+        let w = w();
+        p.observe(std::slice::from_ref(&w), 100);
+        assert_eq!(p.next_manual_change(&w, 100), Some(2100));
+        assert_eq!(p.next_manual_change(&w, 2100), None);
+        p.attempted(2100);
+        assert_eq!(p.next_manual_change(&w, 3000), Some(12100));
+        p.attempted(40000);
+        p.attempted(80000);
+        assert_eq!(p.next_manual_change(&w, 100000), Some(302100));
+        assert!(p.manual_ready(&w, 302100));
     }
     #[test]
     fn handled_and_paused_are_not_fake_cooldowns() {

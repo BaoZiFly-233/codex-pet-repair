@@ -1,10 +1,13 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
-mod appearance;
 mod bridge;
 mod native;
 mod policy;
+#[path = "../shared/protocol.rs"]
+mod protocol;
 mod repair;
 mod selftest;
+#[path = "../shared/signal.rs"]
+mod signal;
 mod storage;
 mod ui;
 fn main() {
@@ -51,14 +54,8 @@ fn main() {
         }
         return;
     }
-    let preview = args
-        .iter()
-        .position(|s| s == "--ui-preview")
-        .and_then(|i| args.get(i + 1));
     ui::run(
         args.iter().any(|s| s == "--tray"),
-        preview.map(std::path::PathBuf::from),
-        args.iter().any(|s| s == "--legacy-ui"),
         args.iter().any(|s| s == "--ui"),
     );
 }
