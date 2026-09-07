@@ -56,19 +56,8 @@ $coreTarget = Join-Path $release 'PetRepair.exe'
 if (!(Test-Path -LiteralPath $coreTarget) -or (Get-FileHash -LiteralPath $coreSource).Hash -ne (Get-FileHash -LiteralPath $coreTarget).Hash) {
     Copy-Item -LiteralPath $coreSource -Destination $coreTarget -Force
 }
-foreach ($document in @('README.md','CREDITS.md','DEVELOPMENT.md','CHANGELOG.md','REFACTOR-VALIDATION.md')) {
-    Copy-Item -LiteralPath (Join-Path $project $document) -Destination $release -Force
-}
+Copy-Item -LiteralPath (Join-Path $project 'CREDITS.md') -Destination $release -Force
 Copy-Item -LiteralPath (Join-Path $project 'LICENSE') -Destination $release -Force
-New-Item -ItemType Directory -Path (Join-Path $release 'assets') -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $project 'assets\pet-repair-pixel.svg') -Destination (Join-Path $release 'assets') -Force
-New-Item -ItemType Directory -Path (Join-Path $release 'assets\screenshots') -Force | Out-Null
-foreach ($theme in @('light','dark')) {
-    Copy-Item -LiteralPath (Join-Path $project "assets\screenshots\$theme.png") -Destination (Join-Path $release 'assets\screenshots')
-}
-$patchNotes=Join-Path $release 'experiments\native-ui\vendor\PATCHES.md'
-New-Item -ItemType Directory -Path (Split-Path -Parent $patchNotes) -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'vendor\PATCHES.md') -Destination $patchNotes
 $coreLicenses=Join-Path $project 'licenses'
 foreach ($file in Get-ChildItem -LiteralPath $coreLicenses -File -Recurse | Where-Object { !$_.FullName.StartsWith($coreLicenses+'\ui\',[StringComparison]::OrdinalIgnoreCase) }) {
     $destination=Join-Path $release ([IO.Path]::GetRelativePath($project,$file.FullName))

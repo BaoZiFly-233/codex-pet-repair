@@ -13,7 +13,7 @@
 
 安装 Rust 1.94 或更新版本、Visual Studio C++ 桌面开发工具及 Windows SDK。在 x64 Developer PowerShell 中运行：
 
-以下命令在源码目录执行；下载包中的开发文档不包含完整源码。
+以下命令在源码目录执行；下载包只包含程序及致谢、许可文件，开发文档保留在源码仓库。
 
 ```powershell
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
