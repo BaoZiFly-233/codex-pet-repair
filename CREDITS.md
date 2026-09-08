@@ -9,6 +9,8 @@
 | [Codex #41513](https://github.com/openai/codex/issues/41513) | 故障排查线索 |
 | [ChatGPT-Overlay-Fix](https://github.com/FoegiUpdate/ChatGPT-Overlay-Fix) | 浮窗交互恢复方法 |
 | [Codex Tweaks](https://github.com/codex-tweaks/codex-tweaks) | 功能组织参考 |
+| [Codex #33224](https://github.com/openai/codex/issues/33224#issuecomment-5563439305) | V2 宠物缺少真实鼠标视线输入的线索，以及使用已有鼠标事件补充视线输入的思路 |
+| [Codex++](https://github.com/BigPizzaV3/CodexPlusPlus)（AGPL-3.0） | 通过本机 CDP 连接原生视线事件的架构参考；本项目独立实现连接、识别与生命周期管理，未复制其源码 |
 | [Slint Gallery](https://github.com/slint-ui/slint/tree/master/examples/gallery/ui) | 界面组件示例 |
 | [Microsoft Fluent](https://fluent2.microsoft.design/components/windows) | 界面设计参考 |
 
@@ -22,6 +24,7 @@
 | [softbuffer](https://github.com/rust-windowing/softbuffer) | 窗口绘制 |
 | [Serde / serde_json](https://serde.rs/) | 设置与状态读写 |
 | [windows-rs / windows-sys](https://github.com/microsoft/windows-rs) | Windows 功能调用 |
+| [tungstenite](https://github.com/snapview/tungstenite-rs)（MIT / Apache-2.0） | 仅本机的 WebSocket 通信，不启用 TLS 或异步运行时 |
 | [png](https://github.com/image-rs/image-png) | 开发 feature 的截图导出；图像依赖链也使用 PNG 解码 |
 
 Slint 使用 Royalty-free Desktop, Mobile, and Web Applications License 2.0，窗口呈现、主题与菜单包含本项目的适配修改。

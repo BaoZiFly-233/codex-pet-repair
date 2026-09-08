@@ -69,6 +69,13 @@ fn apply(ui: &RepairWindow, state: &protocol::UiState) {
     update!(get_automatic, set_automatic, state.automatic);
     update!(get_autostart, set_autostart, state.autostart);
     update!(get_tray_only, set_tray_only, state.tray_only);
+    update!(get_look_at_mouse, set_look_at_mouse, state.look_at_mouse);
+    update!(get_gaze_status, set_gaze_status, state.gaze_status.as_str());
+    update!(
+        get_gaze_needs_launch,
+        set_gaze_needs_launch,
+        state.gaze_needs_launch
+    );
     update!(get_busy, set_busy, state.busy);
     update!(get_can_repair, set_can_repair, state.can_repair);
     update!(get_confirming, set_confirming, state.awaiting_confirmation);
@@ -77,6 +84,7 @@ fn restore_settings(ui: &RepairWindow, state: &protocol::UiState) {
     ui.set_automatic(state.automatic);
     ui.set_autostart(state.autostart);
     ui.set_tray_only(state.tray_only);
+    ui.set_look_at_mouse(state.look_at_mouse);
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
@@ -255,7 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(client::Error::Action(error, state)) => {
                         if let Some(state) = state {
                             apply(&ui, &state);
-                            *last.borrow_mut() = state;
+                            *last.borrow_mut() = *state;
                         }
                         restore_settings(&ui, &last.borrow());
                         ui.set_notice(error.into());

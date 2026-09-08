@@ -19,6 +19,7 @@ pub fn data_dir() -> PathBuf {
 pub struct Settings {
     pub automatic: bool,
     pub tray_only: bool,
+    pub look_at_mouse: bool,
     pub verified_versions: Vec<String>,
 }
 impl Settings {
@@ -189,6 +190,7 @@ mod tests {
         let mut settings: Settings =
             serde_json::from_str(r#"{"automatic":true,"verified_versions":["1.2.3.0"]}"#).unwrap();
         assert!(!settings.tray_only);
+        assert!(!settings.look_at_mouse);
         settings.tray_only = true;
         let saved = serde_json::to_string(&settings).unwrap();
         let loaded: Settings = serde_json::from_str(&saved).unwrap();
@@ -201,6 +203,7 @@ mod tests {
             let mut settings = Settings {
                 automatic,
                 tray_only: false,
+                look_at_mouse: true,
                 verified_versions: vec![],
             };
             settings.confirm_version("1.2.3.0");
@@ -208,6 +211,7 @@ mod tests {
             let reloaded: Settings =
                 serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
             assert_eq!(reloaded.automatic, automatic);
+            assert!(reloaded.look_at_mouse);
             assert_eq!(reloaded.verified_versions, ["1.2.3.0"]);
         }
     }
