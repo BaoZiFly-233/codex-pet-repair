@@ -11,18 +11,24 @@ if (!$CoreBinary) { $CoreBinary = Join-Path $project 'target\release\pet-repair.
 $binary = $UiBinary
 if (!(Test-Path -LiteralPath $binary)) { throw 'Build the native UI first.' }
 if (!(Test-Path -LiteralPath $CoreBinary)) { throw 'Build the core first.' }
-$dependencies = & cargo "+$Toolchain" tree --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') --locked --target x86_64-pc-windows-msvc -e normal,no-proc-macro --prefix none --no-dedupe --format '{p}' | Sort-Object -Unique
-if ($LASTEXITCODE -ne 0) { throw 'Dependency inventory failed.' }
-$metadata = & cargo "+$Toolchain" metadata --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'Dependency metadata failed.' }
+$dependencies = @()
+$packages = @()
+foreach ($manifest in @((Join-Path $PSScriptRoot 'Cargo.toml'), (Join-Path $project 'Cargo.toml'))) {
+    $dependencies += & cargo "+$Toolchain" tree --manifest-path $manifest --locked --target x86_64-pc-windows-msvc -e normal,no-proc-macro --prefix none --no-dedupe --format '{p}'
+    if ($LASTEXITCODE -ne 0) { throw 'Dependency inventory failed.' }
+    $metadata = & cargo "+$Toolchain" metadata --manifest-path $manifest --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Dependency metadata failed.' }
+    $packages += $metadata.packages
+}
+$dependencies = $dependencies | Sort-Object -Unique
 $notices = @{}
 $missing = @()
 foreach ($dependency in $dependencies) {
     if ($dependency -notmatch '^([\w-]+) v([\w.+-]+)(?: \(.*\))?$') { continue }
-    if ($Matches[1] -eq 'pet-repair-native-ui') { continue }
+    if ($Matches[1] -in @('pet-repair-native-ui', 'pet-repair')) { continue }
     $crateName = $Matches[1]+'-'+$Matches[2]
     $dependency = $Matches[1]+' v'+$Matches[2]
-    $package = $metadata.packages | Where-Object { $_.name+'-'+$_.version -eq $crateName } | Select-Object -First 1
+    $package = $packages | Where-Object { $_.name+'-'+$_.version -eq $crateName } | Select-Object -First 1
     if (!$package) { throw "Dependency metadata not found: $crateName" }
     $crate = Split-Path -Parent $package.manifest_path
     $files = @(Get-ChildItem -LiteralPath $crate -File | Where-Object Name -match '^(LICENSE|COPYING|NOTICE|UNLICENSE)')
@@ -56,7 +62,6 @@ $coreTarget = Join-Path $release 'PetRepair.exe'
 if (!(Test-Path -LiteralPath $coreTarget) -or (Get-FileHash -LiteralPath $coreSource).Hash -ne (Get-FileHash -LiteralPath $coreTarget).Hash) {
     Copy-Item -LiteralPath $coreSource -Destination $coreTarget -Force
 }
-Copy-Item -LiteralPath (Join-Path $project 'CREDITS.md') -Destination $release -Force
 Copy-Item -LiteralPath (Join-Path $project 'LICENSE') -Destination $release -Force
 $coreLicenses=Join-Path $project 'licenses'
 foreach ($file in Get-ChildItem -LiteralPath $coreLicenses -File -Recurse | Where-Object { !$_.FullName.StartsWith($coreLicenses+'\ui\',[StringComparison]::OrdinalIgnoreCase) }) {

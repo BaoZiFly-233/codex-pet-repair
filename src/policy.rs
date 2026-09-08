@@ -11,6 +11,19 @@ struct Record {
     rect: [i32; 4],
     since: u64,
     completed: bool,
+    retry: bool,
+    health: InputHealth,
+    evidence_at: u64,
+    misses: u8,
+    first_miss: u64,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InputHealth {
+    #[default]
+    Unknown,
+    Healthy,
+    Mismatch,
+    Failed,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Block {
@@ -20,6 +33,7 @@ pub enum Block {
     Cooldown(u64),
     Unstable(u64),
     Discovering,
+    CheckingInput,
 }
 impl Block {
     pub fn wait_ms(&self) -> Option<u64> {
@@ -36,10 +50,50 @@ impl Block {
             Self::Cooldown(_) => "暂时不能修复 · 请等待修复间隔结束",
             Self::Unstable(_) => "等待浮窗稳定 · 请暂时不要移动宠物",
             Self::Discovering => "正在识别浮窗 · 请稍候",
+            Self::CheckingInput => "正在检查输入 · 请将鼠标移到宠物上；仍无法拖动时可手动修复",
         }
     }
 }
 impl Policy {
+    pub fn input_failed(&self, w: &Window) -> bool {
+        self.windows
+            .get(&w.key())
+            .is_some_and(|r| r.health == InputHealth::Failed)
+    }
+    // Only evidence for the current identity and geometry can authorize a retry.
+    pub fn input(&mut self, w: &Window, health: InputHealth, now: u64) -> bool {
+        let Some(r) = self.windows.get_mut(&w.key()) else {
+            return false;
+        };
+        if r.rect != w.rect {
+            return false;
+        }
+        let previous = r.health;
+        if health == InputHealth::Mismatch {
+            if r.misses == 0 || now.saturating_sub(r.evidence_at) > 2500 {
+                r.first_miss = now;
+                r.misses = 0;
+            }
+            r.misses = r.misses.saturating_add(1);
+            r.health = if r.misses >= 3 && now.saturating_sub(r.first_miss) >= 2000 {
+                InputHealth::Failed
+            } else {
+                InputHealth::Unknown
+            };
+            if r.health == InputHealth::Failed {
+                r.completed = false;
+                r.retry = true;
+            }
+        } else {
+            r.misses = 0;
+            r.health = health;
+            if health == InputHealth::Healthy {
+                r.completed = true;
+            }
+        }
+        r.evidence_at = now;
+        previous != r.health
+    }
     pub fn observe(&mut self, windows: &[Window], now: u64) {
         self.windows
             .retain(|key, _| windows.iter().any(|w| w.key() == *key));
@@ -48,10 +102,17 @@ impl Policy {
                 rect: w.rect,
                 since: now,
                 completed: false,
+                retry: false,
+                health: InputHealth::Unknown,
+                evidence_at: 0,
+                misses: 0,
+                first_miss: 0,
             });
             if r.rect != w.rect {
                 r.rect = w.rect;
                 r.since = now;
+                r.health = InputHealth::Unknown;
+                r.misses = 0;
             }
         }
     }
@@ -71,6 +132,14 @@ impl Policy {
         }
         if !manual && self.windows.get(&w.key()).is_some_and(|r| r.completed) {
             return Err(Block::Handled);
+        }
+        if !manual
+            && self.windows.get(&w.key()).is_some_and(|r| {
+                r.retry
+                    && (r.health != InputHealth::Failed || now.saturating_sub(r.evidence_at) > 2500)
+            })
+        {
+            return Err(Block::CheckingInput);
         }
         if self.attempts.len() >= 3 {
             return Err(Block::RateLimit(
@@ -99,23 +168,13 @@ impl Policy {
         self.attempts.push_back(now);
     }
     pub fn manual_ready(&self, w: &Window, now: u64) -> bool {
-        self.windows
-            .get(&w.key())
-            .is_some_and(|r| now.saturating_sub(r.since) >= 2000)
-            && self
-                .attempts
-                .iter()
-                .filter(|n| now.saturating_sub(**n) < 300_000)
-                .count()
-                < 3
-            && self
-                .attempts
-                .back()
-                .is_none_or(|n| now.saturating_sub(*n) >= 10_000)
+        self.windows.contains_key(&w.key()) && self.next_manual_change(w, now).is_none()
     }
     pub fn complete(&mut self, w: &Window) {
         if let Some(r) = self.windows.get_mut(&w.key()) {
             r.completed = true;
+            r.health = InputHealth::Unknown;
+            r.misses = 0;
         }
         self.halted = false;
     }
@@ -185,6 +244,68 @@ mod tests {
         assert!(p.allow(&w, 6000, false).is_ok());
     }
     #[test]
+    fn resize_and_silence_never_authorize_a_retry() {
+        let mut p = Policy::default();
+        let mut w = w();
+        p.observe(std::slice::from_ref(&w), 0);
+        p.complete(&w);
+        w.rect[2] += 20;
+        p.observe(std::slice::from_ref(&w), 3000);
+        for now in [4000, 5000, 6000] {
+            p.input(&w, InputHealth::Unknown, now);
+        }
+        assert_eq!(p.allow(&w, 40000, false), Err(Block::Handled));
+        p.input(&w, InputHealth::Healthy, 41000);
+        assert_eq!(p.allow(&w, 42000, false), Err(Block::Handled));
+    }
+    #[test]
+    fn confirmed_failure_requires_continuous_current_evidence() {
+        let mut p = Policy::default();
+        let mut w = w();
+        p.observe(std::slice::from_ref(&w), 0);
+        p.attempted(2000);
+        p.complete(&w);
+        for now in [3000, 4000] {
+            p.input(&w, InputHealth::Mismatch, now);
+        }
+        assert_eq!(p.allow(&w, 5000, false), Err(Block::Handled));
+        p.input(&w, InputHealth::Unknown, 5000); // occlusion or stale coordinates breaks the streak
+        for now in [30000, 31000, 32000] {
+            p.input(&w, InputHealth::Mismatch, now);
+        }
+        assert_eq!(p.allow(&w, 32000, false), Ok(()));
+        assert_eq!(p.allow(&w, 34501, false), Err(Block::CheckingInput));
+        let old = w.clone();
+        w.rect[2] += 1;
+        p.observe(std::slice::from_ref(&w), 35000);
+        assert!(!p.input(&old, InputHealth::Mismatch, 36000));
+        assert_eq!(p.allow(&w, 38000, false), Err(Block::CheckingInput));
+        p.input(&w, InputHealth::Healthy, 39000);
+        assert_eq!(p.allow(&w, 40000, false), Err(Block::Handled));
+    }
+    #[test]
+    fn failure_never_erases_limits_pause_or_identity() {
+        let mut p = Policy::default();
+        let w = w();
+        p.observe(std::slice::from_ref(&w), 0);
+        for time in [2000, 32000, 62000] {
+            p.attempted(time);
+        }
+        p.complete(&w);
+        for now in [70000, 71000, 72000] {
+            p.input(&w, InputHealth::Mismatch, now);
+        }
+        assert_eq!(p.allow(&w, 72000, false), Err(Block::RateLimit(230000)));
+        p.halted = true;
+        assert_eq!(p.allow(&w, 72000, false), Err(Block::Paused));
+        let mut other = w.clone();
+        other.owner.start += 1;
+        assert!(!p.input(&other, InputHealth::Healthy, 72001));
+        p.complete(&w);
+        p.halted = false;
+        assert_eq!(p.allow(&w, 400000, false), Err(Block::Handled));
+    }
+    #[test]
     fn identity_reuse() {
         let mut p = Policy::default();
         let mut w = w();
@@ -239,15 +360,24 @@ mod tests {
     fn manual_wakeup_tracks_real_deadlines() {
         let mut p = Policy::default();
         let w = w();
+        assert!(!p.manual_ready(&w, 100));
         p.observe(std::slice::from_ref(&w), 100);
         assert_eq!(p.next_manual_change(&w, 100), Some(2100));
+        assert!(!p.manual_ready(&w, 2099));
+        assert!(p.manual_ready(&w, 2100));
         assert_eq!(p.next_manual_change(&w, 2100), None);
         p.attempted(2100);
         assert_eq!(p.next_manual_change(&w, 3000), Some(12100));
+        assert!(!p.manual_ready(&w, 12099));
+        assert!(p.manual_ready(&w, 12100));
         p.attempted(40000);
         p.attempted(80000);
         assert_eq!(p.next_manual_change(&w, 100000), Some(302100));
+        assert!(!p.manual_ready(&w, 302099));
         assert!(p.manual_ready(&w, 302100));
+        let mut reopened = w.clone();
+        reopened.owner.start += 1;
+        assert!(!p.manual_ready(&reopened, 302100));
     }
     #[test]
     fn handled_and_paused_are_not_fake_cooldowns() {

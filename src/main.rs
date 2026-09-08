@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 mod bridge;
+mod gaze;
+mod gaze_transport;
 mod native;
 mod policy;
 #[path = "../shared/protocol.rs"]

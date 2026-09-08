@@ -71,7 +71,7 @@ pub struct Owner {
     pub path: String,
     pub test: bool,
 }
-fn owner(pid: u32, test: bool) -> Result<Owner, String> {
+pub(crate) fn owner(pid: u32, test: bool) -> Result<Owner, String> {
     unsafe {
         let mut session = 0;
         let mut own_session = 0;

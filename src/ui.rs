@@ -11,7 +11,7 @@ use std::{
     mem::{size_of, zeroed},
     ptr::{null, null_mut},
     sync::atomic::{AtomicUsize, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use windows_sys::{
     core::w,
@@ -37,6 +37,8 @@ const TOGGLE_AUTO: u16 = 111;
 const TRAY_ONLY: u16 = 112;
 const COPY_DIAGNOSTICS: u16 = 113;
 const OPEN_LOG_FOLDER: u16 = 114;
+const LOOK_AT_MOUSE: u16 = 115;
+const LAUNCH_GAZE: u16 = 116;
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 fn arm_event_batch(due: &mut Option<u64>, now: u64) -> bool {
     if due.is_some() {
@@ -79,6 +81,9 @@ struct App {
     published_wait: Option<u64>,
     revision: u64,
     ui_queries: u64,
+    gaze: Option<crate::gaze::Manager>,
+    gaze_config: Option<(bool, bool, bool)>,
+    preparing: Option<(Window, bool, Instant)>,
 }
 impl App {
     fn new() -> Self {
@@ -115,12 +120,16 @@ impl App {
             published_wait: None,
             revision: 0,
             ui_queries: 0,
+            gaze: None,
+            gaze_config: None,
+            preparing: None,
         }
     }
     fn now(&self) -> u64 {
         self.clock.elapsed().as_millis() as u64
     }
     unsafe fn init(&mut self) {
+        self.gaze = Some(crate::gaze::Manager::new(self.hwnd as usize));
         self.icon = create_icon();
         self.taskbar = RegisterWindowMessageW(w!("TaskbarCreated"));
         self.add_tray();
@@ -196,29 +205,22 @@ impl App {
         }
         self.process_watches.clear();
         for (pid, _) in &pids {
-            let hook = SetWinEventHook(
-                EVENT_OBJECT_CREATE,
-                EVENT_OBJECT_HIDE,
-                null_mut(),
-                Some(event_callback),
-                *pid,
-                0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-            );
-            if !hook.is_null() {
-                self.hooks.push(hook);
-            }
-            let location = SetWinEventHook(
-                EVENT_OBJECT_LOCATIONCHANGE,
-                EVENT_OBJECT_LOCATIONCHANGE,
-                null_mut(),
-                Some(event_callback),
-                *pid,
-                0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-            );
-            if !location.is_null() {
-                self.hooks.push(location);
+            for (first, last) in [
+                (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE),
+                (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
+            ] {
+                let hook = SetWinEventHook(
+                    first,
+                    last,
+                    null_mut(),
+                    Some(event_callback),
+                    *pid,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                );
+                if !hook.is_null() {
+                    self.hooks.push(hook);
+                }
             }
             if let Some(w) = native::ProcessWatch::start(*pid, self.hwnd as usize, PROCESS_EXIT) {
                 self.process_watches.push(w);
@@ -266,25 +268,70 @@ impl App {
         }
     }
     unsafe fn schedule_automatic(&mut self) {
+        if let Some((_, manual, _)) = &self.preparing {
+            self.try_fix(*manual);
+            return;
+        }
         if self.settings.automatic && self.windows.len() == 1 {
             self.try_fix(false);
         }
     }
+    unsafe fn cancel_preparation(&mut self) -> bool {
+        if let Some((window, _, _)) = self.preparing.take() {
+            self.policy.complete(&window);
+            KillTimer(self.hwnd, 2);
+            self.say("修复已取消 · 窗口未改动");
+            true
+        } else {
+            false
+        }
+    }
     unsafe fn try_fix(&mut self, manual: bool) {
+        if !manual && !self.settings.automatic {
+            self.preparing = None;
+            return;
+        }
         if self.running.is_some() || (!manual && self.awaiting_confirmation) {
             return;
         }
         if self.windows.len() != 1 {
+            self.preparing = None;
             self.say("请仅保留需要修复的浮窗");
             return;
         }
         let w = self.windows[0].clone();
+        if self
+            .preparing
+            .as_ref()
+            .is_some_and(|(target, _, _)| target.key() != w.key() || target.rect != w.rect)
+        {
+            self.preparing = None;
+            self.say("宠物窗口已变化 · 已取消本次准备，请稍后重试");
+            return;
+        }
         if !manual && !self.settings.verified_versions.contains(&w.owner.version) {
             self.say("此版本需先手动修复并确认有效");
             return;
         }
         let now = self.now();
+        if self
+            .preparing
+            .as_ref()
+            .is_some_and(|(_, _, began)| began.elapsed() >= Duration::from_secs(8))
+        {
+            self.preparing = None;
+            self.policy.halted = true;
+            self.say("暂未确认跟随已暂停 · 本次未改动窗口，可稍后重试");
+            storage::event(
+                "INPUT_PAUSE_TIMEOUT",
+                None,
+                "本次修复未执行",
+                "未收到跟随暂停确认，保留窗口原状。",
+            );
+            return;
+        }
         if let Err(reason) = self.policy.allow(&w, now, manual) {
+            self.preparing = None;
             self.say(reason.message());
             if !manual && reason.wait_ms().is_some() {
                 self.say(&format!("自动修复等待中 · {}", reason.message()));
@@ -307,10 +354,27 @@ impl App {
         }
         let gate = native::Gate::acquire(native::REPAIR_LOCK);
         if gate.is_err() || native::community_running() {
+            self.preparing = None;
             self.say("其他修复器正在运行，请先停用");
             return;
         }
         drop(gate);
+        if let Some(gaze) = &self.gaze {
+            if self.preparing.is_none() {
+                self.preparing = Some((w.clone(), manual, Instant::now()));
+                gaze.configure(self.settings.look_at_mouse, self.settings.automatic, true);
+                self.gaze_config =
+                    Some((self.settings.look_at_mouse, self.settings.automatic, true));
+                self.say("正在准备修复 · 暂停跟随后继续");
+                SetTimer(self.hwnd, 2, 150, None);
+                return;
+            }
+            if !gaze.suspended() {
+                SetTimer(self.hwnd, 2, 150, None);
+                return;
+            }
+        }
+        self.preparing = None;
         match repair::launch(w.clone()) {
             Ok(r) => {
                 self.last_operation = r.operation_id.clone();
@@ -512,6 +576,7 @@ impl App {
         }
     }
     fn detail_text(&self) -> String {
+        let gaze = self.gaze_status();
         let result = self
             .last
             .as_ref()
@@ -539,6 +604,10 @@ impl App {
             result,
             targets
         );
+        let info = format!(
+            "{info}\n\n看向鼠标：{}\n原因：{}\n{}",
+            gaze.text, gaze.code, gaze.detail
+        );
         if self.last_error.is_empty() {
             info
         } else {
@@ -546,18 +615,39 @@ impl App {
         }
     }
     fn snapshot(&self) -> serde_json::Value {
+        let gaze = self.gaze_status();
+        let state = self.state_with_gaze(&gaze);
         serde_json::json!({
-            "message":self.status_text(),"automatic_status":self.automatic_status(),"automatic":self.settings.automatic,
-            "autostart":self.autostart,"tray_only":self.settings.tray_only,
-            "busy":self.running.is_some(),"can_repair":self.windows.len()==1 && self.windows.first().is_some_and(|w|self.policy.manual_ready(w,self.now())),
-            "awaiting_confirmation":self.awaiting_confirmation,
+            "message":self.status_text(),"automatic_status":state.automatic_status,"automatic":state.automatic,
+            "autostart":state.autostart,"tray_only":state.tray_only,
+            "look_at_mouse":state.look_at_mouse,"gaze_status":state.gaze_status,"gaze_code":gaze.code,
+            "busy":state.busy,"can_repair":state.can_repair,
+            "awaiting_confirmation":state.awaiting_confirmation,
             "version":self.windows.first().map(|w|w.owner.version.as_str()),
             "elapsed_ms":self.running.as_ref().map(|r|r.started.elapsed().as_millis() as u64).unwrap_or(0),
             "detail":self.detail_text(),"core_pid":std::process::id(),
             "metrics":{"process_scans":self.discovery.process_scans,"window_scans":self.discovery.window_scans,"window_checks":self.discovery.window_checks,"ui_queries":self.ui_queries}
         })
     }
+    fn gaze_status(&self) -> crate::gaze::Status {
+        if self.settings.look_at_mouse {
+            self.gaze.as_ref().map(|g| g.status()).unwrap_or_default()
+        } else {
+            let mut result = crate::gaze::Status::default();
+            if self.settings.automatic {
+                result.detail = self
+                    .gaze
+                    .as_ref()
+                    .map(|g| g.status().detail)
+                    .unwrap_or_default();
+            }
+            result
+        }
+    }
     fn light_state(&self) -> UiState {
+        self.state_with_gaze(&self.gaze_status())
+    }
+    fn state_with_gaze(&self, gaze: &crate::gaze::Status) -> UiState {
         let (status, hint) = self
             .message
             .split_once(" · ")
@@ -569,8 +659,20 @@ impl App {
             automatic: self.settings.automatic,
             autostart: self.autostart,
             tray_only: self.settings.tray_only,
-            busy: self.running.is_some(),
+            look_at_mouse: self.settings.look_at_mouse,
+            gaze_status: gaze.text.clone(),
+            gaze_needs_launch: self.settings.look_at_mouse
+                && matches!(
+                    gaze.code.as_str(),
+                    "debug_required"
+                        | "codex_running"
+                        | "launch_failed"
+                        | "disconnected"
+                        | "identity_rejected"
+                ),
+            busy: self.running.is_some() || self.preparing.is_some(),
             can_repair: self.running.is_none()
+                && self.preparing.is_none()
                 && self.windows.len() == 1
                 && self.policy.manual_ready(&self.windows[0], self.now()),
             awaiting_confirmation: self.awaiting_confirmation,
@@ -579,6 +681,25 @@ impl App {
         }
     }
     unsafe fn publish(&mut self) {
+        let config = (
+            self.settings.look_at_mouse,
+            self.settings.automatic,
+            self.running.is_some()
+                || self.preparing.is_some()
+                || ((self.settings.look_at_mouse || self.settings.automatic)
+                    && self.last.as_ref().is_some_and(|report| !report.restored)
+                    && self.target.as_ref().is_some_and(|target| {
+                        self.windows
+                            .iter()
+                            .any(|window| window.key() == target.key())
+                    })),
+        );
+        if self.gaze_config != Some(config) {
+            if let Some(gaze) = &self.gaze {
+                gaze.configure(config.0, config.1, config.2);
+            }
+            self.gaze_config = Some(config);
+        }
         let mut state = self.light_state();
         state.revision = 0;
         state.wait_remaining_ms = 0;
@@ -616,32 +737,26 @@ impl App {
             }
             "repair" => self.command(FIX),
             "cancel" => {
+                self.cancel_preparation();
                 if let Some(r) = &self.running {
                     r.cancel();
                     self.say("正在取消…");
                 }
             }
-            "automatic" => {
+            "automatic" | "autostart" | "tray_only" | "look_at_mouse" => {
                 if let Some(enabled) = request.enabled {
-                    if self.settings.automatic != enabled {
-                        self.command(AUTO);
+                    let (id, current) = match request.command.as_str() {
+                        "automatic" => (AUTO, self.settings.automatic),
+                        "autostart" => (START, storage::autostart_enabled()),
+                        "tray_only" => (TRAY_ONLY, self.settings.tray_only),
+                        _ => (LOOK_AT_MOUSE, self.settings.look_at_mouse),
+                    };
+                    if enabled != current {
+                        self.command(id);
                     }
                 }
             }
-            "autostart" => {
-                if let Some(enabled) = request.enabled {
-                    if storage::autostart_enabled() != enabled {
-                        self.command(START);
-                    }
-                }
-            }
-            "tray_only" => {
-                if let Some(enabled) = request.enabled {
-                    if self.settings.tray_only != enabled {
-                        self.command(TRAY_ONLY);
-                    }
-                }
-            }
+            "launch_gaze" => self.command(LAUNCH_GAZE),
             "confirm" => {
                 if self.awaiting_confirmation {
                     match request.enabled {
@@ -652,18 +767,13 @@ impl App {
                 }
             }
             "open" => self.command(OPEN),
-            "open_log" => {
-                if let Err(e) = self.open_log() {
-                    return serde_json::json!({"error":e});
-                }
-            }
-            "copy_diagnostics" => {
-                if let Err(e) = self.copy_diagnostics() {
-                    return serde_json::json!({"error":e});
-                }
-            }
-            "open_log_folder" => {
-                if let Err(e) = self.open_log_folder() {
+            "open_log" | "copy_diagnostics" | "open_log_folder" => {
+                let result = match request.command.as_str() {
+                    "open_log" => self.open_log(),
+                    "copy_diagnostics" => self.copy_diagnostics(),
+                    _ => self.open_log_folder(),
+                };
+                if let Err(e) = result {
                     return serde_json::json!({"error":e});
                 }
             }
@@ -711,7 +821,7 @@ impl App {
                 if let Some(r) = &self.running {
                     r.cancel();
                     self.say("正在取消…");
-                } else {
+                } else if !self.cancel_preparation() {
                     self.refresh(true);
                     self.try_fix(true);
                 }
@@ -736,7 +846,16 @@ impl App {
                     },
                 );
                 if !self.settings.automatic {
-                    KillTimer(self.hwnd, 2);
+                    if self
+                        .preparing
+                        .as_ref()
+                        .is_some_and(|(_, manual, _)| !manual)
+                    {
+                        self.preparing = None;
+                    }
+                    if self.preparing.is_none() {
+                        KillTimer(self.hwnd, 2);
+                    }
                     self.say("自动修复已关闭");
                 } else {
                     self.schedule_automatic();
@@ -792,6 +911,30 @@ impl App {
                 }
             }
             COPY_DIAGNOSTICS => self.copy_diagnostics()?,
+            LOOK_AT_MOUSE => {
+                self.settings.look_at_mouse = !self.settings.look_at_mouse;
+                if let Err(error) = self.settings.save() {
+                    self.settings.look_at_mouse = !self.settings.look_at_mouse;
+                    return Err(error);
+                }
+                storage::event(
+                    "SETTING_GAZE",
+                    None,
+                    "更改看向鼠标设置",
+                    if self.settings.look_at_mouse {
+                        "看向鼠标：开启"
+                    } else {
+                        "看向鼠标：关闭"
+                    },
+                );
+            }
+            LAUNCH_GAZE => {
+                if self.settings.look_at_mouse {
+                    if let Some(gaze) = &self.gaze {
+                        gaze.launch();
+                    }
+                }
+            }
             OPEN_LOG_FOLDER => self.open_log_folder()?,
             EXIT => {
                 if let Some(child) = &self.ui_process {
@@ -856,6 +999,8 @@ impl App {
             (OPEN, "打开界面", false),
             (TRAY_ONLY, "仅托盘启动", self.settings.tray_only),
             (START, "开机启动", storage::autostart_enabled()),
+            (LOOK_AT_MOUSE, "看向鼠标", self.settings.look_at_mouse),
+            (LAUNCH_GAZE, "以跟随模式启动 Codex", false),
             (DETAIL, "打开日志", false),
             (COPY_DIAGNOSTICS, "复制诊断摘要", false),
             (OPEN_LOG_FOLDER, "打开日志文件夹", false),
@@ -974,6 +1119,28 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> is
         }
         WM_CREATE => app.init(),
         WM_COMMAND => app.command((wp & 0xffff) as u16),
+        crate::gaze::MESSAGE => {}
+        crate::gaze::INPUT_MESSAGE => {
+            if let Some(sample) = app.gaze.as_ref().and_then(|g| g.take_input()) {
+                if app.running.is_none()
+                    && app.preparing.is_none()
+                    && sample.observed.elapsed() < Duration::from_millis(1500)
+                {
+                    app.refresh(false);
+                    if app.windows.len() == 1
+                        && app.windows[0].key() == sample.window.key()
+                        && app.policy.input(&sample.window, sample.health, app.now())
+                    {
+                        if sample.health == crate::policy::InputHealth::Healthy {
+                            storage::event("INPUT_HEALTHY", None, "宠物输入检查正常", "实际鼠标位于宠物交互区域，Windows 命中同一宠物窗口；无需重复修复。");
+                        } else if app.policy.input_failed(&sample.window) {
+                            storage::event("INPUT_FAILURE_CONFIRMED", None, "宠物输入持续异常，已安排修复检查", "鼠标位于宠物交互区域，排除按键、遮挡和坐标变化后，至少三次检查未命中宠物。仍遵循自动开关、稳定时间与次数限制。");
+                        }
+                    }
+                    app.schedule_automatic();
+                }
+            }
+        }
         WM_TIMER => match wp {
             1 => {
                 if let Some(child) = &mut app.ui_process {
@@ -1053,6 +1220,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> is
         }
         WM_CLOSE => app.command(EXIT),
         WM_DESTROY => {
+            app.gaze = None;
             ROOT.store(0, Ordering::Relaxed);
             for hook in app.hooks.drain(..) {
                 UnhookWinEvent(hook);

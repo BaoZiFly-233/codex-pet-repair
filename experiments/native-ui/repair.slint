@@ -47,6 +47,9 @@ export component RepairWindow inherits Window {
     in-out property <bool> automatic;
     in-out property <bool> autostart;
     in-out property <bool> tray-only;
+    in-out property <bool> look-at-mouse;
+    in-out property <string> gaze-status;
+    in-out property <bool> gaze-needs-launch;
     in-out property <bool> busy;
     in-out property <bool> can-repair;
     in-out property <bool> confirming;
@@ -153,6 +156,24 @@ export component RepairWindow inherits Window {
                             MenuItem { title: "打开日志文件夹"; enabled: root.connected && !root.sending; activated => { root.command("open_log_folder", false); } }
                             MenuSeparator {}
                             MenuItem { title: "组件许可"; activated => { attribution.show(); } }
+                        }
+                    }
+                }
+                Surface {
+                    vertical-stretch: 0;
+                    VerticalBox {
+                        padding: 12px; spacing: 8px;
+                        Switch {
+                            text: "看向鼠标"; checked <=> root.look-at-mouse;
+                            enabled: root.connected && !root.sending;
+                            toggled => { root.command("look_at_mouse", self.checked); }
+                        }
+                        if root.look-at-mouse: Text { text: root.gaze-status; color: Palette.foreground; wrap: word-wrap; }
+                        if root.gaze-needs-launch: Text { text: "启动时启用仅本机调试连接，退出 Codex 后关闭。"; color: Palette.foreground; wrap: word-wrap; font-size: 12px; }
+                        if root.gaze-needs-launch: Button {
+                            text: "以跟随模式启动 Codex"; height: 32px;
+                            enabled: root.connected && !root.sending && !root.busy;
+                            clicked => { root.command("launch_gaze", false); }
                         }
                     }
                 }

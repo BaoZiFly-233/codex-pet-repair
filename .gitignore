@@ -1,4 +1,5 @@
 /target/
+/experiments/native-ui/target/
 *.pdb
 /dist/
 /data/

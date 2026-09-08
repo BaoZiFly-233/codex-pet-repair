@@ -32,6 +32,8 @@ pub fn configure(ui: &RepairWindow, args: &[String]) -> Result<(), Box<dyn std::
     ui.set_connected(!args.iter().any(|s| s == "--disabled"));
     ui.set_can_repair(true);
     ui.set_automatic(true);
+    ui.set_look_at_mouse(true);
+    ui.set_gaze_status("已连接 · 移动宠物周围的鼠标".into());
     ui.set_confirming(args.iter().any(|s| s == "--confirm"));
     ui.set_busy(args.iter().any(|s| s == "--busy"));
     ui.on_command(|command, _| {

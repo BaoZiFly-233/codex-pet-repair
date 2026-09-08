@@ -13,7 +13,7 @@ use windows_sys::Win32::{
 #[derive(Debug)]
 pub enum Error {
     Connection(String),
-    Action(String, Option<UiState>),
+    Action(String, Option<Box<UiState>>),
 }
 impl From<String> for Error {
     fn from(value: String) -> Self {
@@ -146,8 +146,11 @@ pub fn send(command: &str, enabled: bool) -> Result<UiState, Error> {
             return Err("后台程序路径不匹配".into());
         }
     }
-    let enabled =
-        matches!(command, "automatic" | "autostart" | "tray_only" | "confirm").then_some(enabled);
+    let enabled = matches!(
+        command,
+        "automatic" | "autostart" | "tray_only" | "look_at_mouse" | "confirm"
+    )
+    .then_some(enabled);
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut request = format!(
         "{}\n",
@@ -184,7 +187,7 @@ fn decode(bytes: &[u8]) -> Result<UiState, Error> {
         .transpose()
         .map_err(|_| "后台状态格式无效")?;
     if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
-        return Err(Error::Action(error.into(), state));
+        return Err(Error::Action(error.into(), state.map(Box::new)));
     }
     state
         .ok_or_else(|| Error::Connection("后台版本不匹配，请使用同一候选包中的主程序和界面".into()))
@@ -257,16 +260,12 @@ mod tests {
     }
     #[test]
     fn action_errors_preserve_authoritative_settings() {
-        let result = decode(br#"{"status":"failed","automatic":false,"error":"save failed"}"#);
+        let result = decode(
+            br#"{"status":"failed","automatic":false,"look_at_mouse":true,"error":"save failed"}"#,
+        );
         assert!(matches!(
             result,
-            Err(Error::Action(
-                _,
-                Some(UiState {
-                    automatic: false,
-                    ..
-                })
-            ))
+            Err(Error::Action(_, Some(state))) if !state.automatic && state.look_at_mouse
         ));
         assert!(matches!(
             decode(br#"{"error":"clipboard busy"}"#),
