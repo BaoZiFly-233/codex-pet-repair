@@ -6,7 +6,7 @@
 
 宠物还在桌面上，却怎么也拖不动？点一下，试着恢复它。
 
-**[⬇ 下载 1.1.0](https://github.com/BaoZiFly-233/codex-pet-repair/releases/latest)**　·　[开始使用](#三步开始)　·　[反馈问题](https://github.com/BaoZiFly-233/codex-pet-repair/issues)
+**[⬇ 下载 1.2.0](https://github.com/BaoZiFly-233/codex-pet-repair/releases/latest)**　·　[开始使用](#三步开始)　·　[反馈问题](https://github.com/BaoZiFly-233/codex-pet-repair/issues)
 
 Windows 64 位 · 解压即用 · 完整解压约 11 MB
 
@@ -29,7 +29,7 @@ Windows 64 位 · 解压即用 · 完整解压约 11 MB
 ## 三步开始
 
 **1 · 下载并解压**<br>
-在下载页选择 `PetRepair-v1.1.0-windows-x64.zip`，完整解压到一个方便找到的文件夹。
+在下载页选择 `PetRepair-v1.2.0-windows-x64.zip`，完整解压到一个方便找到的文件夹。
 
 **2 · 打开工具和宠物**<br>
 运行 `PetRepair.exe`，打开 Codex，让宠物出现在桌面上。请先关闭其他宠物修复工具，并尽量只保留一个宠物浮窗。
@@ -52,7 +52,7 @@ Windows 64 位 · 解压即用 · 完整解压约 11 MB
 
 自动修复、开机启动和看向鼠标默认关闭，开关分别保存；Codex 更新后，需要重新确认拖动修复效果。
 
-1.1.0 的改动见 [更新记录](CHANGELOG.md)，构建与验证说明见 [开发说明](DEVELOPMENT.md)和[验证记录](REFACTOR-VALIDATION.md)。
+1.2.0 的改动见 [更新记录](CHANGELOG.md)，构建与验证说明见 [开发说明](DEVELOPMENT.md)和[验证记录](REFACTOR-VALIDATION.md)。
 
 ## 常见问题
 
