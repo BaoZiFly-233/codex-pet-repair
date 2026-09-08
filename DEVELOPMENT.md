@@ -30,7 +30,7 @@ cargo build --release --locked --manifest-path experiments/native-ui/Cargo.toml
 
 资源编译器默认是 Windows SDK 的 `rc.exe`，也可通过 `RC` 指定 `llvm-rc.exe`。根目录 `package.ps1` 转发到当前原生界面打包脚本。
 
-打包脚本默认生成 `dist/PetRepair-v1.1.0-windows-x64.zip`；指定 `-OutputDirectory` 可另选一个不存在的目录。使用自定义 Cargo 缓存时传入 `-CoreBinary` 和 `-UiBinary`。脚本拒绝覆盖已有目录，从锁定依赖生成许可清单，不分发用户 `data`、PDB 或构建缓存。
+打包脚本默认生成 `dist/PetRepair-v1.2.0-windows-x64.zip`；指定 `-OutputDirectory` 可另选一个不存在的目录。使用自定义 Cargo 缓存时传入 `-CoreBinary` 和 `-UiBinary`。脚本拒绝覆盖已有目录，从锁定依赖生成许可清单，不分发用户 `data`、PDB 或构建缓存。
 
 解压结构为 `PetRepair.exe` 与 `ui/PetRepair.UI.exe`，保留整个目录。关闭界面退出 UI 进程，托盘核心继续运行。
 
